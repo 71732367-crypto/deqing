@@ -1,0 +1,131 @@
+# CMake build directories
+build/
+cmake-build/
+out/
+dist/
+build_release/
+cmake-build-debug/
+cmake-build-release/
+
+
+# Compiled object files
+*.o
+*.obj
+
+# Compiled libraries
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+deqing_serve
+test_dqglib
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# IDE files
+.vscode/
+.idea/
+.idea/editor.xml
+.idea/deqing_serve.iml
+*.swp
+*.swo
+*~
+
+# Editor backup files
+*.bak
+*.tmp
+*.temp
+
+# Log files
+*.log
+logs/
+
+# Test results
+Testing/
+test_results/
+coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Configuration files (if they contain sensitive data)
+# config.json
+# config.yaml
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Package files
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Documentation build
+docs/_build/
+doxygen/
+
+# Dependency directories
+vendor/
+deps/
+external/
+
+# Local development
+.local/
+local/
+.env
+.env.local
+.env.*.local
+
+
+
+# Cache directories
+.cache/
+__pycache__/
+node_modules/
+
+# Profiling data
+*.prof
+*.profile
+
+# Memory dumps
+core
+core.*
+*.stackdump
+
+# Valgrind data
+valgrind.*
+
+# Performance analysis
+*.perf
+*.trace
+/.lingma/rules/language.md
+/.github/copilot-instructions.md
+
+#test data
+data/
+
+#js版本代码
+js/
+
+# 代码生成工具
+.codebuddy/
+.github/
+.idea/
+.lingma/

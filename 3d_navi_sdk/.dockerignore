@@ -1,0 +1,53 @@
+# 构建目录
+build/
+cmake-build*/
+cmake-build-debug*/
+
+# 版本控制
+.git/
+.gitignore
+
+# IDE 文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.temp
+*.log
+
+# 编译产物
+*.o
+*.so
+*.a
+*.exe
+
+# CMake 缓存
+CMakeCache.txt
+CMakeFiles/
+
+# 测试文件
+test/
+
+# 文档
+README*
+*.md
+
+# Docker 相关
+Dockerfile*
+.dockerignore
+docker-compose*
+
+# 其他不需要的文件
+*.bak
+*.backup
+
+#测试数据
+data/
