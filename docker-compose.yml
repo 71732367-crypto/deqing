@@ -1,0 +1,94 @@
+services:
+  deqing_serve:
+    # 使用您提供的镜像名称
+    image: deqing_serve:1-12-5    # 请替换为实际的标签
+    container_name: deqing_service  # 容器名称
+    restart: unless-stopped  # 容器重启策略
+
+    # 只读文件系统
+    read_only: true  # 将文件系统设置为只读
+    # Linux Capabilities 控制
+    cap_drop:
+      - ALL # 删除所有默认权限
+    cap_add:
+      - NET_BIND_SERVICE  #
+    # 非root用户运行
+    user: appuser  # 请确保在Dockerfile中创建了该用户
+    # 临时文件系统
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+      - /run:size=64M,mode=1777
+      - /app/tmp:size=32M,mode=1777
+    # 安全选项
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+
+    # 进程限制
+    # pids_limit: 1024
+
+    # 端口映射
+    ports:
+      - "9990:9997" #宿主机暴露端口：容器端口
+
+    # 环境变量
+    environment:
+      - TZ=Asia/Shanghai
+      - LOG_LEVEL=WARN
+      - SECURITY_MODE=ENABLED
+      - LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/x86_64-linux-gnu
+
+    # 核心配置：外部挂载
+    volumes:
+      # === 配置文件挂载 ===
+      # 直接挂载配置文件到app根目录，确保程序能找到
+      # [注意] 宿主机必须先存在这些文件，否则会被当成目录创建
+      - ./deployment/config/config.json:/app/config.json:ro
+
+      # 单独挂载 region.json 到app根目录
+      - ./deployment/config/region.json:/app/region.json:ro
+
+      # === 数据目录挂载 ===
+      # [注意] 宿主机的这些目录必须 chmod 777 或者 chown 给对应 UID
+      # 日志目录
+      - ./deployment/logs:/app/logs:rw
+
+      # 静态数据文件（osgb 文件等）
+      - ./deployment/data:/app/data:rw
+
+      # 用户上传文件目录
+      - ./deployment/uploads:/app/uploads:rw
+
+      # === 可选：SSL 证书挂载（如果需要 HTTPS） ===
+      # - ./deployment/ssl:/app/ssl:ro
+
+    # 网络配置
+    networks:
+      - deqing_network
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9997/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # # 资源限制
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'
+    #       memory: 2G
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 512
+
+# 网络配置
+networks:
+  deqing_network:
+    driver: bridge
+# 数据卷配置
+volumes:
+  postgres_data:
+    driver: local

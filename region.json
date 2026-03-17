@@ -1,0 +1,29 @@
+{
+  "region": {
+    "name": "德清县研究区域",
+    "bounds": {
+      "southwest": {
+        "longitude": 119.8436725825645226,
+        "latitude": 30.4995322056211791
+      },
+      "northwest": {
+        "longitude": 119.8436725825645226,
+        "latitude": 30.6175621573347883
+      },
+      "northeast": {
+        "longitude": 120.1128929038345632,
+        "latitude": 30.6175621573347883
+      },
+      "southeast": {
+        "longitude": 120.1128929038345632,
+        "latitude": 30.4995322056211791
+      }
+
+    },
+    "height": {
+      "bottom": -600,
+
+      "top": 600
+    }
+  }
+  }

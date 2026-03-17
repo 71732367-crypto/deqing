@@ -1,0 +1,60 @@
+#ifndef GEOPARAM_HPP
+#define GEOPARAM_HPP
+
+#include <array>
+
+// 常数定义
+constexpr double PI = 3.14159265358979323846;
+
+// WGS84参数
+constexpr double WGS84a = 6378137.0; // 长半径
+constexpr double WGS84b = 6356752.314245; // 短半径
+constexpr double WGS84f = 0.003352810664747; // 地球的扁率
+constexpr double WGS84c = 6399593.62575849; // 极半径
+constexpr double R_E = 6371000.0; // 地球平均半径
+
+// 椭球体离心率的平方（不同阶数）
+constexpr double WGS84e2 = 0.006694379990141;
+constexpr double WGS84e4 = 0.000044814723452;
+constexpr double WGS84e6 = 0.000000300006788;
+constexpr double WGS84e8 = 0.000000002008359;
+constexpr double WGS84e12 = 0.006739496742276;
+constexpr double WGS84e14 = 0.000045420816339;
+constexpr double WGS84e16 = 0.000000306113444;
+constexpr double WGS84e18 = 0.000000002063051;
+
+// 投影模型参数
+constexpr double WGS84b0 = 0.994977106085797;
+constexpr double WGS84b1 = 1.003364089817647;
+constexpr double WGS84b2 = -0.005022893914203;
+constexpr double WGS84b3 = 0.001124189376384;
+constexpr double WGS84b4 = 0.000021152428084;
+constexpr double WGS84b5 = 0.000001699459457;
+constexpr double WGS84b6 = -0.000000110863458;
+constexpr double WGS84b7 = 0.000000002717858;
+constexpr double WGS84b8 = 0.000000000634630;
+constexpr double WGS84b9 = 0.000000000004358;
+
+// 经纬度转弧度的乘常数
+constexpr double RegToRad = 0.0174532925199433;
+
+// 精度细分角度（度）
+constexpr std::array<double, 30> degEdge = {
+    45.0, 67.5, 78.75, 84.375, 87.1875, 88.59375, 89.296875,
+    89.6484375, 89.82421875, 89.912109375, 89.9560546875,
+    89.9780273438, 89.9890136719, 89.9945068359, 89.9972534180,
+    89.9986267090, 89.9993133545, 89.9996566772, 89.9998283386,
+    89.9999141693, 89.9999570847, 89.9999785423, 89.9999892712,
+    89.9999946356, 89.9999973178, 89.9999986589, 89.9999993294,
+    89.9999996647, 89.9999998324, 89.9999999162
+};
+
+// 网格面积
+constexpr std::array<double, 23> gridArea = {
+    21300300000000, 5809180000000, 1486070000000, 373690000000, 93559277708,
+    23398383989, 5850131527, 1462566356, 365643681.3, 91411051.09, 22852770.94,
+    5713193.247, 1428298.344, 357074.5879, 89268.6471, 22317.16178, 5579.290446,
+    1394.822612, 348.7056529, 87.17641323, 21.79410331, 5.448525827, 1.362131457
+};
+
+#endif // GEOPARAM_HPP
