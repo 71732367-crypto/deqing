@@ -439,14 +439,17 @@ struct AsyncContext {
                 }
 
                 // 根据层级截取网格编码前缀
-                const auto slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
+                std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
 
-                // [关键修改] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
+
+
+
+                // [新增] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
                 std::string queryPrefix = prefix;
                 if (prefix == "hlz") {
                     queryPrefix = "hl";
                 }
-                const std::string redisKey = queryPrefix + "_" + slice;      // Redis键名（使用重定向后的前缀）
+                const std::string redisKey = queryPrefix + "_" + slice;
 
                 const std::string logicalKey = prefix + "_" + std::to_string(level); // 逻辑键名（保持原始前缀用于查找配置）
 
@@ -635,7 +638,8 @@ struct AsyncContextFirst {
                 }
 
                 // 根据层级截取网格编码前缀
-                const auto slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
+                std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
+
 
                 // [关键修改] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
                 std::string queryPrefix = prefix;
@@ -869,7 +873,9 @@ void checkLineConflict(
             }
 
             // 构造Redis键名
-            const auto slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
+            std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
+
+
 
             // [新增] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
             std::string queryPrefix = prefix;
@@ -1040,7 +1046,8 @@ void checkLineConflictFirst(
             }
 
             // 构造Redis键名
-            const auto slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
+            std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
+
 
             // [新增] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
             std::string queryPrefix = prefix;

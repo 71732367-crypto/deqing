@@ -74,12 +74,6 @@ if(NOT TARGET SQLite3_lib)
     message(STATUS "Created SQLite3_lib interface target")
 endif()
 
-add_library(dqglib STATIC IMPORTED GLOBAL)
-set_target_properties(dqglib PROPERTIES
-        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/dqglib/lib/dqglib.lib"
-        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/dqglib/include"
-)
-
 # 3. 查找核心框架和依赖
 find_package(Drogon CONFIG REQUIRED)
 find_package(TBB REQUIRED)
@@ -104,17 +98,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         OpenSSL::SSL
         OpenSSL::Crypto
         JsonCpp::JsonCpp
-        tiff.lib
-        ZLIB::ZLIB
-        proj.lib
-        osg.lib
-        osgDB.lib
-        osgGA.lib
-        osgViewer.lib
-        osgUtil.lib
-        osgText.lib
-        OpenThreads.lib
 )
+
 # ##############################################################################
 # 包含目录和源文件配置
 # ##############################################################################
@@ -139,6 +124,7 @@ endif()
 # 子目录构建配置
 # ##############################################################################
 
+add_subdirectory(dqglib)
 
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/CMakeLists.txt")
     add_subdirectory(test)
@@ -163,3 +149,4 @@ endforeach()
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/" DESTINATION share/${PROJECT_NAME}/data)
 endif()
+

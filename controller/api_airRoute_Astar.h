@@ -44,7 +44,7 @@ namespace api
             // 完整的 API 路径为: http://域名/AstarPathPlane
             // 请求方法: POST
             // 请求体格式: JSON
-            METHOD_ADD(Astar::AstarPathPlane, "/AstarPathPlane", Post);
+            METHOD_ADD(Astar::AstarPathPlane, "AstarPathPlane", Post);
 
             // === 路由映射表结束 ===
             METHOD_LIST_END

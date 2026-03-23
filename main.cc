@@ -103,10 +103,41 @@ int main() {
     // 初始化 A* 算法配置（从 config.json 加载）
     api::airRoute::initializeAstarConfig();
     
+    // ==========================================
+    // 全局 CORS 跨域配置开始
+    // ==========================================
+
+    // 1. 拦截所有的 OPTIONS 预检请求，直接返回 200 并携带跨域头
+    drogon::app().registerPreRoutingAdvice([](const drogon::HttpRequestPtr &req,
+                                              drogon::FilterCallback &&defer,
+                                              drogon::FilterChainCallback &&deferNext) {
+        if (req->method() == drogon::HttpMethod::Options) {
+            auto res = drogon::HttpResponse::newHttpResponse();
+            res->addHeader("Access-Control-Allow-Origin", "*");
+            res->addHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+            res->addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+            res->setStatusCode(drogon::k200OK);
+            defer(res);
+            return;
+        }
+        deferNext(); // 不是 OPTIONS 请求，放行给后续路由
+    });
+
+    // 2. 在所有请求处理完成后，为正常的响应（如 200 的 POST 请求）补充跨域头
+    drogon::app().registerPostHandlingAdvice([](const drogon::HttpRequestPtr &req,
+                                                const drogon::HttpResponsePtr &res) {
+        // 如果想更严谨，可以根据前端的 Origin 动态设置，这里简单粗暴允许所有 (*)
+        res->addHeader("Access-Control-Allow-Origin", "*");
+    });
+
+    // ==========================================
+    // 全局 CORS 跨域配置结束
+    // ==========================================
+
     //Set HTTP listener address and port
     // Note: The port in config.json will be used, this is just a fallback
     drogon::app().addListener("0.0.0.0", 9997);
-    
+
     //Run HTTP framework,the method will block in the internal event loop
     drogon::app().run();
     return 0;

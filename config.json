@@ -320,7 +320,7 @@
         "enabled_compressed_request": false,
         // enable_request_stream: Defaults to false. If true the server will enable stream mode for http requests.
         // See the wiki for more details.
-        "enable_request_stream": false,
+        "enable_request_stream": false
     },
     //plugins: Define all plugins running in the application
     "plugins": [

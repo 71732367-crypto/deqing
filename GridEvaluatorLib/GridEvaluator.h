@@ -15,6 +15,7 @@ namespace api {
     namespace airRoute {
 
         struct CandidateInfo {
+
             std::string code;                  // 网格编码
             int arrivalTime;                   // 到达时间（秒，北京时间 UTC+8）
             int wdTime;                        // 规范化后的天气数据时间戳（北京时间，按日或按小时对齐）

@@ -373,6 +373,7 @@ struct AsyncContext {
                         sliceCode = cand.code.substr(0, group.level);
                     }
 
+                    // ==========================================
                     // [关键修改] 键名重定向逻辑
                     // 如果前缀是 hlz (航路避让)，则查询 hl (航路) 的数据
                     // 这样可以复用 hl 的数据源，但应用 hlz 的校验逻辑 (checkValueNotEmpty)
@@ -510,6 +511,7 @@ void GridEvaluator::checkCandidates(
                 if (cand.code.length() > (size_t)group.level) {
                     sliceCode = cand.code.substr(0, group.level);
                 }
+
 
                 // [关键修改] 生成 Redis 查询键时，拦截 hlz 前缀，重定向到 hl
                 // 当规则是 hlz (航路避让) 时，实际上需要查询 hl (航路) 数据
