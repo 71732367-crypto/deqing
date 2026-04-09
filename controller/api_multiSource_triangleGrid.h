@@ -4,7 +4,12 @@
 #include <unordered_set>
 #include <string>
 #include <dqg/Extractor.h>
+// 在 .h 文件中加入
 
+bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
+                     const std::string& type,
+                     const std::string& operation,
+                     const std::string& content);
 // 前向声明
 struct BaseTile;
 struct PointLBHd;

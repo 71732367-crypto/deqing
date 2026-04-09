@@ -14,7 +14,7 @@
 #include <fstream>
 #include <future>
 #include <thread>
-
+#include "LineToGrids.h"
 
 using namespace api::multiSource;
 
@@ -101,13 +101,13 @@ void geometricGrid::getGridByPointAndRadius(const HttpRequestPtr& req, std::func
 
         // 枚举并精确过滤距离，构造完整网格对象（去重）
         Json::Value cells(Json::arrayValue);
-        
+
         // 优化：多线程并行计算
         unsigned int numThreads = std::thread::hardware_concurrency();
         if (numThreads == 0) numThreads = 4;
-        
+
         int64_t totalCols = endC - startC + 1;
-        
+
         if (totalCols < numThreads * 2) {
             std::unordered_set<std::string> seenCodes;
             for (int64_t c = startC; c <= endC; ++c) {
@@ -147,12 +147,12 @@ void geometricGrid::getGridByPointAndRadius(const HttpRequestPtr& req, std::func
         } else {
             std::vector<std::future<std::vector<Json::Value>>> futures;
             int64_t chunkSize = (totalCols + numThreads - 1) / numThreads;
-            
+
             for (unsigned int i = 0; i < numThreads; ++i) {
                 int64_t c_start = startC + i * chunkSize;
                 int64_t c_end = std::min(c_start + chunkSize - 1, endC);
                 if (c_start > c_end) break;
-                
+
                 futures.push_back(std::async(std::launch::async, [c_start, c_end, startR, endR, startH, endH, level, &baseTile, pt, radius, hgtStep]() {
                     std::vector<Json::Value> localCells;
                     for (int64_t c = c_start; c <= c_end; ++c) {
@@ -164,7 +164,7 @@ void geometricGrid::getGridByPointAndRadius(const HttpRequestPtr& req, std::func
                                 if (distance3D(centerPt, pt) <= radius + hgtStep / 2) {
                                     try {
                                         std::string code = IJH2DQG_str(ijh.row, ijh.column, ijh.layer, static_cast<uint8_t>(level));
-                                        
+
                                         Json::Value item;
                                         item["code"] = code;
                                         item["bottom"] = TEMP.bottom;
@@ -188,7 +188,7 @@ void geometricGrid::getGridByPointAndRadius(const HttpRequestPtr& req, std::func
                     return localCells;
                 }));
             }
-            
+
             for (auto& f : futures) {
                 auto vec = f.get();
                 for (const auto& v : vec) {
@@ -219,16 +219,16 @@ void geometricGrid::getGridByPointAndRadius(const HttpRequestPtr& req, std::func
 
 /**
  * @brief 线矩形缓冲区网格化接口（管道网格化）
- * 
+ *
  * 该接口根据给定的三维线坐标序列、宽度、高度和网格层级，计算并返回线的矩形缓冲区内的所有网格信息。
  * 使用lineBufferFilled函数实现局部网格化，基于DQG网格系统。
- * 
+ *
  * 输入参数：
  * 1. line：三维线坐标序列，每个点包含经度、纬度和高度信息
  * 2. level：网格层级，决定网格精度（0-21）
  * 3. halfWidth：矩形缓冲区的半宽度
  * 4. halfHeight：矩形缓冲区的半高度
- * 
+ *
  * @param req HTTP请求对象，包含JSON格式的请求体
  * @param callback 异步回调函数，用于返回HTTP响应
  */
@@ -309,7 +309,7 @@ void geometricGrid::getGridByPolylineAndRect(const HttpRequestPtr& req, std::fun
                 callback(resp);
                 return;
             }
-            
+
             PointLBHd point;
             point.Lng = pt[(Json::ArrayIndex)0].asDouble(); // 经度
             point.Lat = pt[(Json::ArrayIndex)1].asDouble(); // 纬度
@@ -337,7 +337,7 @@ void geometricGrid::getGridByPolylineAndRect(const HttpRequestPtr& req, std::fun
         // 获取每个网格的详细信息 (并行优化)
         std::vector<LatLonHei> gridDetails;
         size_t count = gridCodes.size();
-        
+
         unsigned int numThreads = std::thread::hardware_concurrency();
         if (numThreads == 0) numThreads = 4;
 
@@ -386,19 +386,19 @@ void geometricGrid::getGridByPolylineAndRect(const HttpRequestPtr& req, std::fun
         res["status"] = "success";                         // 状态标识
         res["data"]["count"] = static_cast<Json::UInt>(gridDetails.size()); // 返回生成的网格数量
         res["data"]["cells"] = Json::Value(Json::arrayValue); // 创建JSON数组存储网格详细信息
-        
+
         // 将网格详细信息添加到响应中
         for (const auto &g : gridDetails) {
             Json::Value item;
             item["code"] = g.code;            // 网格编码
-            
+
             // 构建center数组：[经度, 纬度, 高度]
             Json::Value center(Json::arrayValue);
             center.append(g.longitude);      // 经度
             center.append(g.latitude);       // 纬度
             center.append(g.height);         // 高度
             item["center"] = center;
-            
+
             item["minlon"] = g.west;          // 最小经度（西边界）
             item["maxlon"] = g.east;          // 最大经度（东边界）
             item["minlat"] = g.south;         // 最小纬度（南边界）
@@ -407,7 +407,7 @@ void geometricGrid::getGridByPolylineAndRect(const HttpRequestPtr& req, std::fun
             item["top"] = g.top;              // 顶边界
             res["data"]["cells"].append(item);
         }
-        
+
         auto resp = HttpResponse::newHttpJsonResponse(res);  // 创建JSON响应
         resp->setStatusCode(k200OK);                         // 设置响应状态码为200
         callback(resp);                                      // 异步返回响应
@@ -482,18 +482,14 @@ void geometricGrid::getGridByLine(const HttpRequestPtr& req, std::function<void 
             return;
         }
 
-        // 将JSON数组转换为PointLBHd向量
-        std::vector<PointLBHd> linePoints;
+        std::vector<std::array<double, 3>> linePoints;
         for (const auto &pt : lineJs) {
-            // 跳过无效点（不是数组或数组长度小于3，无法表示三维坐标）
             if (!pt.isArray() || pt.size() < 3) continue;
-            
-            PointLBHd point;
-            point.Lng = pt[(Json::ArrayIndex)0].asDouble();   // 经度（第一个元素）
-            point.Lat = pt[(Json::ArrayIndex)1].asDouble();   // 纬度（第二个元素）
-            point.Hgt = pt[(Json::ArrayIndex)2].asDouble();   // 高度（第三个元素）
-            
-            linePoints.push_back(point);
+            linePoints.push_back({
+                pt[(Json::ArrayIndex)0].asDouble(),
+                pt[(Json::ArrayIndex)1].asDouble(),
+                pt[(Json::ArrayIndex)2].asDouble()
+            });
         }
 
         // 验证转换后的点数量
@@ -510,45 +506,40 @@ void geometricGrid::getGridByLine(const HttpRequestPtr& req, std::function<void 
         // 使用全局常量DQBaseTile作为基础瓦片范围
         const BaseTile& baseTile = ::getProjectBaseTile();
 
-        // 调用lineToLocalCode函数实现三维线段局部网格化
-        std::vector<std::string> gridCodes = lineToLocalCode(linePoints, static_cast<uint8_t>(level), baseTile);
+        // 调用 singleLineToGrids2 获取严格按路径排序的网格编码
+        std::vector<std::string> gridCodes = singleLineToGrids2(linePoints, level, baseTile);
 
-        // 获取每个网格编码的详细信息
+        // 获取每个网格编码的详细信息，并保持原有顺序去重
         std::vector<LatLonHei> gridDetails;
-        for (const std::string& code : gridCodes) {
-            LatLonHei detail = getLocalTileLatLon(code, baseTile);
-            gridDetails.push_back(detail);
-        }
+        std::unordered_set<std::string> seenCodes; // 记录已经处理过的编码
 
-        // 对结果进行去重处理，避免重复网格
-        std::sort(gridDetails.begin(), gridDetails.end(), [](const LatLonHei &a, const LatLonHei &b){
-            return a.code < b.code; // 按网格编码排序
-        });
-        gridDetails.erase(
-            std::unique(gridDetails.begin(), gridDetails.end(), [](const LatLonHei &a, const LatLonHei &b){
-                return a.code == b.code; // 按网格编码去重
-            }),
-            gridDetails.end()
-        );
+        for (const std::string& code : gridCodes) {
+            // 如果这个网格还没被加入过结果中
+            if (seenCodes.find(code) == seenCodes.end()) {
+                LatLonHei detail = getLocalTileLatLon(code, baseTile);
+                gridDetails.push_back(detail);
+                seenCodes.insert(code); // 标记为已处理
+            }
+        }
 
         // 构造成功响应
         Json::Value res;
         res["status"] = "success";                         // 状态标识
         res["data"]["count"] = static_cast<Json::UInt>(gridDetails.size()); // 返回生成的网格数量
         res["data"]["cells"] = Json::Value(Json::arrayValue); // 创建JSON数组存储网格详细信息
-        
+
         // 将网格详细信息添加到响应中
         for (const auto &g : gridDetails) {
             Json::Value item;
             item["code"] = g.code;            // 网格编码
-            
+
             // 构建center数组：[经度, 纬度, 高度]
             Json::Value center(Json::arrayValue);
             center.append(g.longitude);      // 经度
             center.append(g.latitude);       // 纬度
             center.append(g.height);         // 高度
             item["center"] = center;
-            
+
             item["minlon"] = g.west;          // 最小经度（西边界）
             item["maxlon"] = g.east;          // 最大经度（东边界）
             item["minlat"] = g.south;         // 最小纬度（南边界）
@@ -557,7 +548,7 @@ void geometricGrid::getGridByLine(const HttpRequestPtr& req, std::function<void 
             item["top"] = g.top;              // 顶边界
             res["data"]["cells"].append(item);
         }
-        
+
         auto resp = HttpResponse::newHttpJsonResponse(res);  // 创建JSON响应
         resp->setStatusCode(k200OK);                         // 设置响应状态码为200
         callback(resp);                                      // 异步返回响应
@@ -575,16 +566,16 @@ void geometricGrid::getGridByLine(const HttpRequestPtr& req, std::function<void 
 
 /**
  * @brief 多边形局部网格化接口
- * 
+ *
  * 该接口根据给定的多边形顶点坐标、网格层级、高度范围，计算并返回多边形区域内的所有网格信息。
  * 支持自定义网格层级和高度范围，使用DQG3DPolygon中的扫描线填充算法。
- * 
+ *
  * 输入参数：
  * 1. polygon：多边形顶点数组，每个顶点包含经度、纬度和高度信息
  * 2. level：网格层级，决定网格精度（0-21）
  * 3. bottom：多边形区域底部高度
  * 4. top：多边形区域顶部高度
- * 
+ *
  * @param req HTTP请求对象，包含JSON格式的请求体
  * @param callback 异步回调函数，用于返回HTTP响应
  */
@@ -657,11 +648,11 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
         for (const auto &pt : polygonJs) {
             // 跳过无效点（不是数组或数组长度小于2，无法表示坐标）
             if (!pt.isArray() || pt.size() < 2) continue;
-            
+
             std::vector<double> coord;
             coord.push_back(pt[(Json::ArrayIndex)0].asDouble());   // 经度（第一个元素）
             coord.push_back(pt[(Json::ArrayIndex)1].asDouble());   // 纬度（第二个元素）
-            
+
             polygonCoords.push_back(coord);
         }
 
@@ -699,7 +690,7 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
         // 获取每个网格的详细信息 (并行优化)
         std::vector<LatLonHei> gridDetails;
         size_t count = gridCodes.size();
-        
+
         unsigned int numThreads = std::thread::hardware_concurrency();
         if (numThreads == 0) numThreads = 4;
 
@@ -748,19 +739,19 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
         res["status"] = "success";                         // 状态标识
         res["data"]["count"] = static_cast<Json::UInt>(gridDetails.size()); // 返回生成的网格数量
         res["data"]["cells"] = Json::Value(Json::arrayValue); // 创建JSON数组存储网格详细信息
-        
+
         // 将网格详细信息添加到响应中
         for (const auto &g : gridDetails) {
             Json::Value item;
             item["code"] = g.code;            // 网格编码
-            
+
             // 构建center数组：[经度, 纬度, 高度]
             Json::Value center(Json::arrayValue);
             center.append(g.longitude);      // 经度
             center.append(g.latitude);       // 纬度
             center.append(g.height);         // 高度
             item["center"] = center;
-            
+
             item["minlon"] = g.west;          // 最小经度（西边界）
             item["maxlon"] = g.east;          // 最大经度（东边界）
             item["minlat"] = g.south;         // 最小纬度（南边界）
@@ -769,7 +760,7 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
             item["top"] = g.top;              // 顶边界
             res["data"]["cells"].append(item);
         }
-        
+
         auto resp = HttpResponse::newHttpJsonResponse(res);  // 创建JSON响应
         resp->setStatusCode(k200OK);                         // 设置响应状态码为200
         callback(resp);                                      // 异步返回响应
@@ -786,10 +777,10 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
 
 /**
  * @brief 多边形局部表面网格化接口（仅生成外表面：顶/底/侧面）
- * 
+ *
  * 该接口与 getGridByPolygonAndHeight 参数与返回格式完全一致，但调用的是仅对多边形体外部表面进行网格化的算法。
  * 使用 dqglib 中的 getPolygonSurfaceGridCodes 来生成外壳网格编码集合。
- * 
+ *
  * @param req HTTP请求指针，包含请求参数
  * @param callback 异步回调函数，用于返回HTTP响应
  */
@@ -835,7 +826,7 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
         int level = (*body)["level"].asInt();
         double bottom = (*body)["bottom"].asDouble();
         double top = (*body)["top"].asDouble();
-        
+
         // 参数有效性验证：网格层级必须在有效范围内
         if (level < 0 || level > 21) {
             Json::Value err;
@@ -846,7 +837,7 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
             callback(resp);
             return;
         }
-        
+
         // 参数有效性验证：顶部高度必须大于底部高度
         if (top <= bottom) {
             Json::Value err;
@@ -861,7 +852,7 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
         // 解析多边形坐标点数据
         std::vector<std::vector<double>> polygonCoords;
         polygonCoords.reserve(polygonJs.size());
-        
+
         // 遍历多边形点数组，提取经纬度坐标
         for (const auto &pt : polygonJs) {
             if (!pt.isArray() || pt.size() < 2) continue;
@@ -870,7 +861,7 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
                 pt[(Json::ArrayIndex)1].asDouble()   // 纬度
             });
         }
-        
+
         // 验证多边形有效点数量
         if (polygonCoords.size() < 3) {
             Json::Value err;
@@ -884,14 +875,14 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
 
         // 获取全局基础瓦片配置
         const BaseTile& baseTile = ::getProjectBaseTile();
-        
+
         // 调用dqglib库函数获取多边形表面网格编码
         std::vector<std::string> gridCodes;
         try {
             // 将多边形JSON数组转换为字符串
             Json::FastWriter writer;
             std::string polygonJson = writer.write(polygonJs);
-            
+
             // 调用核心算法：获取多边形表面网格编码
             gridCodes = getPolygonSurfaceGridCodes(
                 polygonJson,                           // 多边形JSON字符串
@@ -916,7 +907,7 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
         size_t count = gridCodes.size();
         unsigned int numThreads = std::thread::hardware_concurrency();
         if (numThreads == 0) numThreads = 4;  // 默认线程数
-        
+
         if (count < 1000) {
             // 小数据量：单线程处理
             gridDetails.reserve(count);
@@ -932,18 +923,18 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
             // 大数据量：多线程并行处理
             std::vector<std::future<std::vector<LatLonHei>>> futures;
             size_t chunkSize = (count + numThreads - 1) / numThreads;
-            
+
             // 创建多线程任务
             for (unsigned int i = 0; i < numThreads; ++i) {
                 size_t start = i * chunkSize;
                 size_t end = std::min(start + chunkSize, count);
                 if (start >= end) break;
-                
-                futures.push_back(std::async(std::launch::async, 
+
+                futures.push_back(std::async(std::launch::async,
                     [start, end, &gridCodes, &baseTile]() {
                         std::vector<LatLonHei> localDetails;
                         localDetails.reserve(end - start);
-                        
+
                         // 处理分配给当前线程的数据块
                         for (size_t k = start; k < end; ++k) {
                             try {
@@ -956,7 +947,7 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
                     }
                 ));
             }
-            
+
             // 收集多线程处理结果
             gridDetails.reserve(count);
             for (auto& f : futures) {
@@ -966,7 +957,7 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
         }
 
         // 按网格编码排序，确保结果的一致性
-        std::sort(gridDetails.begin(), gridDetails.end(), 
+        std::sort(gridDetails.begin(), gridDetails.end(),
             [](const LatLonHei &a, const LatLonHei &b) {
                 return a.code < b.code;
             });
@@ -976,37 +967,37 @@ void geometricGrid::getSurfaceGridByPolygonAndHeight(const HttpRequestPtr& req, 
         res["status"] = "success";
         res["data"]["count"] = static_cast<Json::UInt>(gridDetails.size());
         res["data"]["cells"] = Json::Value(Json::arrayValue);
-        
+
         // 遍历网格详细信息，构建响应数据
         for (const auto &g : gridDetails) {
             Json::Value item;
             item["code"] = g.code;  // 网格编码
-            
+
             // 构建中心点坐标数组 [经度, 纬度, 高度]
             Json::Value center(Json::arrayValue);
             center.append(g.longitude);
             center.append(g.latitude);
             center.append(g.height);
             item["center"] = center;
-            
+
             // 网格边界坐标
             item["minlon"] = g.west;   // 最小经度
             item["maxlon"] = g.east;   // 最大经度
             item["minlat"] = g.south;  // 最小纬度
             item["maxlat"] = g.north;  // 最大纬度
-            
+
             // 高度范围
             item["bottom"] = g.bottom; // 底部高度
             item["top"] = g.top;       // 顶部高度
-            
+
             res["data"]["cells"].append(item);
         }
-        
+
         // 返回成功响应
         auto resp = HttpResponse::newHttpJsonResponse(res);
         resp->setStatusCode(k200OK);
         callback(resp);
-        
+
     } catch (const std::exception &e) {
         // 全局异常处理：捕获未预期的异常
         Json::Value err;

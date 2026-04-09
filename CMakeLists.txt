@@ -55,6 +55,8 @@ add_executable(${PROJECT_NAME} main.cc
         GridEvaluatorLib/GridEvaluator.cc
         GridEvaluatorLib/conditionCheck.cc
         GridEvaluatorLib/GridEvaluator.h
+        controller/LineToGrids.cpp
+        controller/LineToGrids.h
 )
 
 # ##############################################################################

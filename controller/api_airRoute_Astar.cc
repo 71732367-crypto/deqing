@@ -314,7 +314,7 @@ AStarResult aStarPathSimple(
 
             // 边界检查
             if (nx < 0 || ny < 0 || nz < 0) continue;
-            if (nz != workLayer) continue;
+            //if (nz != workLayer) continue;
             if (static_cast<uint64_t>(nx) >= maxCoord ||
                 static_cast<uint64_t>(ny) >= maxCoord ||
                 static_cast<uint64_t>(nz) >= maxCoord) continue;
@@ -488,6 +488,8 @@ Task<AStarResult> aStarPath(
 
     // 记录最后一次失败的原因，用于调试
     string lastFailReason = "no_path_found";
+    // === 新增：记录发生冲突时，距离终点的最小预估距离 ===
+    double minDistanceToTargetOnFail = std::numeric_limits<double>::max();
     // 搜索步数计数器
     int searchSteps = 0;
     // 搜索步数上限：防止死循环或搜索过久
@@ -557,7 +559,7 @@ Task<AStarResult> aStarPath(
 
             // 坐标边界检查：不允许负数
             if (nx < 0 || ny < 0 || nz < 0) continue;
-            if (nz != workLayer) continue;
+            //if (nz != workLayer) continue;
             // 坐标上界检查
             if (static_cast<uint64_t>(nx) >= maxCoord ||
                 static_cast<uint64_t>(ny) >= maxCoord ||
@@ -751,11 +753,15 @@ Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
             Json::Value firstPoint = pointsArr[0];
             double lon = firstPoint[0].asDouble();
             double lat = firstPoint[1].asDouble();
+            //这里是起飞点的绝对地面海拔
             double originalHeight = firstPoint[2].asDouble();
-
+            // =================================================================
+            // 【关键修改】：绝对巡航高程 = 起飞点绝对海拔 + 相对巡航高度
+            // =================================================================
+            double absoluteWorkHeight = originalHeight + workHeight;
             // 使用 localRowColHeiNumber 统一坐标系计算 workLayer
             // 避免直接除以 getGridSize 导致忽略 baseTile.bottom 偏移的问题
-            IJH workIJH = localRowColHeiNumber(static_cast<uint8_t>(level), lon, lat, workHeight, baseTile);
+            IJH workIJH = localRowColHeiNumber(static_cast<uint8_t>(level), lon, lat, absoluteWorkHeight, baseTile);
             workLayer = static_cast<int>(workIJH.layer);
 
             // 获取起点原始高度对应的层级

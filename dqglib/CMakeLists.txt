@@ -163,7 +163,7 @@ file(GLOB_RECURSE SOURCES "src/*.cpp")
 file(GLOB_RECURSE HEADERS "include/*.h" "include/*.hpp")
 
 # 排除主函数文件
-list(REMOVE_ITEM SOURCES "src/OSGtoCode.cpp")
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/OSGtoCode.cpp")
 
 # 使用原始源文件列表
 set(ALL_SOURCES ${SOURCES})
