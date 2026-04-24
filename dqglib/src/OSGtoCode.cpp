@@ -162,10 +162,10 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         }
 
         // 参数范围验证：确保层级参数在合理范围内
-        if (level < 0 || level > 23) {
+        if (level < 0 || level > 21) {
             Json::Value err;
             err["status"] = "error";
-            err["message"] = "level 必须在 0-23 之间";
+            err["message"] = "level 必须在 0-21 之间";
             auto resp = HttpResponse::newHttpJsonResponse(err);
             resp->setStatusCode(k400BadRequest);
             callback(resp);
@@ -342,6 +342,12 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             //把一堆 3D 三角形（Triangles）映射到某种地理网格系统中（ DQG），并获取这些三角形覆盖的所有网格编码
             std::unordered_set<std::string> chunkCodes;
             const uint8_t gridLevelUint = static_cast<uint8_t>(level);
+
+            // 【新增】提前计算当前层级的网格步长，避免在线程内重复计算
+            const double LDV = (baseTile.north - baseTile.south) / std::pow(2.0, level);
+            const double LOV = (baseTile.east - baseTile.west) / std::pow(2.0, level);
+            const double HDV = 78125.0 / std::pow(2.0, level);
+
             const unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency() / 2);//获取cpu最大线程的1/2
             const size_t trianglesPerThread = (triangles.size() + numThreads - 1) / numThreads;
 
@@ -351,7 +357,8 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                 size_t endIdx = std::min(startIdx + trianglesPerThread, triangles.size());
                 if (startIdx >= triangles.size()) break;
 
-                futures.push_back(std::async(std::launch::async, [&, startIdx, endIdx]() {
+                // 注意这里把 LDV, LOV, HDV 传进了 lambda 表达式
+                futures.push_back(std::async(std::launch::async, [&, startIdx, endIdx, LDV, LOV, HDV]() {
                     std::unordered_set<std::string> localCodes;
                     for (size_t idx = startIdx; idx < endIdx; ++idx) {
                         const auto &t = triangles[idx];
@@ -359,21 +366,68 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                             std::isnan(t.vertex2.Lng) || std::isnan(t.vertex2.Lat) || std::isnan(t.vertex2.Hgt) ||
                             std::isnan(t.vertex3.Lng) || std::isnan(t.vertex3.Lat) || std::isnan(t.vertex3.Hgt))
                             continue;
+
                         try {
-                            IJH p1 = localRowColHeiNumber(gridLevelUint, t.vertex1.Lng, t.vertex1.Lat, t.vertex1.Hgt, baseTile);
-                            IJH p2 = localRowColHeiNumber(gridLevelUint, t.vertex2.Lng, t.vertex2.Lat, t.vertex2.Hgt, baseTile);
-                            IJH p3 = localRowColHeiNumber(gridLevelUint, t.vertex3.Lng, t.vertex3.Lat, t.vertex3.Hgt, baseTile);
+                            // ==========================================================
+                            // 第一步：获取三个顶点的精确浮点网格坐标 (避免过早 floor 取整)
+                            // ==========================================================
+                            auto getExactCol = [&](double lon) {
+                                double exact_col = (lon - baseTile.west) / LOV;
+                                if (baseTile.west < -180.0 && lon > 0.0) exact_col = (lon - baseTile.west - 360.0) / LOV;
+                                return exact_col;
+                            };
+                            auto getExactRow = [&](double lat) { return (baseTile.north - lat) / LDV; };
+                            auto getExactHgt = [&](double hgt) { return std::max(0.0, (hgt - baseTile.bottom) / HDV); };
+
+                            double c1 = getExactCol(t.vertex1.Lng), r1 = getExactRow(t.vertex1.Lat), h1 = getExactHgt(t.vertex1.Hgt);
+                            double c2 = getExactCol(t.vertex2.Lng), r2 = getExactRow(t.vertex2.Lat), h2 = getExactHgt(t.vertex2.Hgt);
+                            double c3 = getExactCol(t.vertex3.Lng), r3 = getExactRow(t.vertex3.Lat), h3 = getExactHgt(t.vertex3.Hgt);
+
+                            // ==========================================================
+                            // 第二步：使用原有的 triangularGrid 填充三角形内部
+                            // ==========================================================
+                            IJH p1{static_cast<uint32_t>(std::floor(r1)), static_cast<uint32_t>(std::floor(c1)), static_cast<uint32_t>(std::floor(h1))};
+                            IJH p2{static_cast<uint32_t>(std::floor(r2)), static_cast<uint32_t>(std::floor(c2)), static_cast<uint32_t>(std::floor(h2))};
+                            IJH p3{static_cast<uint32_t>(std::floor(r3)), static_cast<uint32_t>(std::floor(c3)), static_cast<uint32_t>(std::floor(h3))};
+
                             std::vector<IJH> triangleGrids = triangularGrid(p1, p2, p3, gridLevelUint);
                             for (const auto& grid : triangleGrids) {
                                 std::string code = IJH2DQG_str(grid.row, grid.column, grid.layer, gridLevelUint);
                                 if (!code.empty()) localCodes.insert(code);
                             }
+
+                            // ==========================================================
+                            // 第三步：3D保守光栅化边界补全（替代原来的整数 Bresenham）
+                            // ==========================================================
+                            auto conservativeEdge3D = [&](double er1, double ec1, double eh1, double er2, double ec2, double eh2) {
+                                // 取最大跨距的 2 倍作为步数，保证采样率足够高，不漏任何一个体素
+                                double steps = std::max({std::abs(er2 - er1), std::abs(ec2 - ec1), std::abs(eh2 - eh1)}) * 2.0;
+                                if (steps < 1.0) steps = 1.0;
+
+                                for (int s = 0; s <= steps; ++s) {
+                                    double t = static_cast<double>(s) / steps;
+                                    // 此时再做 floor，就能准确命中边缘碰到的每一个网格
+                                    uint32_t r = static_cast<uint32_t>(std::floor(er1 + t * (er2 - er1)));
+                                    uint32_t c = static_cast<uint32_t>(std::floor(ec1 + t * (ec2 - ec1)));
+                                    uint32_t h = static_cast<uint32_t>(std::floor(eh1 + t * (eh2 - eh1)));
+
+                                    try {
+                                        std::string code = IJH2DQG_str(r, c, h, gridLevelUint);
+                                        if (!code.empty()) localCodes.insert(code);
+                                    } catch (...) {}
+                                }
+                            };
+
+                            // 补全三条边，彻底解决尖角漏网问题
+                            conservativeEdge3D(r1, c1, h1, r2, c2, h2);
+                            conservativeEdge3D(r2, c2, h2, r3, c3, h3);
+                            conservativeEdge3D(r1, c1, h1, r3, c3, h3);
+
                         } catch (...) {}
                     }
                     return localCodes;
                 }));
             }
-
             for (auto& f : futures) {
                 auto localCodes = f.get();
                 chunkCodes.insert(localCodes.begin(), localCodes.end());

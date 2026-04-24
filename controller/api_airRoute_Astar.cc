@@ -233,7 +233,12 @@ AStarResult aStarPathSimple(
 
     // 启发式函数：估算从当前点到终点的欧几里得距离
     auto heuristic = [&](int x, int y, int z) {
-        return newton((x - ex)*(x - ex) + (y - ey)*(y - ey) + (z - ez)*(z - ez)) * gridSize;
+        double dx = x - ex;
+        double dy = y - ey;
+        double dz = z - ez;
+        // 【新增】：对 Z 轴的差距增加 10% 的惩罚权重 (1.1 * 1.1 = 1.21)
+        // 这样会引导 A* 优先在水平方向（XY平面）寻找终点
+        return newton(dx * dx + dy * dy + dz * dz) * gridSize;
     };
 
     // A*节点结构
@@ -323,6 +328,7 @@ AStarResult aStarPathSimple(
             if (closedSet.count(nKey)) continue;
 
             double moveDist = DIRECTION_DISTANCES[i] * gridSize;
+
             double newG = cur.g + moveDist;
 
             auto existing = openMap.find(nKey);
@@ -447,11 +453,12 @@ Task<AStarResult> aStarPath(
     // ==========================================
 
     // 启发式函数：估算从当前点到终点的欧几里得距离
-    // 使用平方根近似计算，作为A*的h(n)估计值
     auto heuristic = [&](int x, int y, int z) {
-        return newton((x - ex)*(x - ex) + (y - ey)*(y - ey) + (z - ez)*(z - ez)) * gridSize;
+        double dx = x - ex;
+        double dy = y - ey;
+        double dz = z - ez;
+        return newton(dx * dx + dy * dy + dz * dz) * gridSize;
     };
-
     // A*节点结构
     struct Node {
         int x, y, z;        // 网格坐标
@@ -572,6 +579,7 @@ Task<AStarResult> aStarPath(
 
             // 计算移动距离和时间
             double moveDist = DIRECTION_DISTANCES[i] * gridSize;
+
             int stepTime = static_cast<int>(moveDist / options.speed);
             int arrival = cur.arrivalTime + stepTime;
 

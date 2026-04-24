@@ -379,51 +379,89 @@ static bool parsePolygonJson(const std::string& json, std::vector<std::pair<doub
     return out.size() >= 3;
 }
 
-//JS使用的优化扫描线填充优化扫描线填充
-static std::vector<Point> optimizedScanLineFillCpp(const std::vector<Point>& polygon) {
-    if (polygon.size() < 3) return {};
-    std::vector<int> ycoords;
-    ycoords.reserve(polygon.size());
-    for (const auto& p : polygon) ycoords.push_back(p.y);
-    int yMin = *std::min_element(ycoords.begin(), ycoords.end());
-    int yMax = *std::max_element(ycoords.begin(), ycoords.end());
+// 用于存储双精度的坐标点
+struct PointDouble {
+    double x;
+    double y;
+};
 
-    struct E { double x; int ymin; int ymax; double dx; };
-    std::vector<E> edges;
+// 改进版：保守光栅化扫描线填充（确保边缘沾边即包含）
+static std::vector<Point> optimizedConservativeScanLineFill(const std::vector<PointDouble>& polygon) {
+    if (polygon.size() < 3) return {};
+
+    // 1. 获取浮点级别的上下边界
+    double minY = polygon[0].y;
+    double maxY = polygon[0].y;
+    for (const auto& p : polygon) {
+        minY = std::min(minY, p.y);
+        maxY = std::max(maxY, p.y);
+    }
+
+    // 向外扩展覆盖所有触碰到的整数行
+    int yStart = static_cast<int>(std::floor(minY));
+    int yEnd   = static_cast<int>(std::floor(maxY));
+
+    struct EdgeDbl { double x; double ymin; double ymax; double dx; };
+    std::vector<EdgeDbl> edges;
     edges.reserve(polygon.size());
+
     for (size_t i = 0; i < polygon.size(); ++i) {
         const auto& p1 = polygon[i];
-        const auto& p2 = polygon[(i+1)%polygon.size()];
-        if (p1.y == p2.y) continue;
-        int ymin = std::min(p1.y, p2.y);
-        int ymax = std::max(p1.y, p2.y);
-        double x = (p1.y < p2.y) ? p1.x : p2.x;
-        double dx = static_cast<double>(p2.x - p1.x) / static_cast<double>(p2.y - p1.y);
-        edges.push_back({x, ymin, ymax, dx});
+        const auto& p2 = polygon[(i + 1) % polygon.size()];
+        if (std::abs(p1.y - p2.y) < 1e-9) continue; // 忽略完全水平的边
+
+        double ymin = std::min(p1.y, p2.y);
+        double ymax = std::max(p1.y, p2.y);
+        double x_at_ymin = (p1.y < p2.y) ? p1.x : p2.x;
+        double dx = (p2.x - p1.x) / (p2.y - p1.y);
+
+        edges.push_back({x_at_ymin, ymin, ymax, dx});
     }
 
     std::vector<Point> filled;
-    for (int y = yMin; y <= yMax; ++y) {
+    // 2. 遍历多边形跨越的每一行网格空间 [y, y+1]
+    for (int y = yStart; y <= yEnd; ++y) {
         std::vector<double> inters;
+        double gridTopY = static_cast<double>(y);
+        double gridBottomY = static_cast<double>(y + 1);
+
         for (const auto& e : edges) {
-            if (y >= e.ymin && y < e.ymax) {
-                double x = e.x + (y - e.ymin) * e.dx;
-                inters.push_back(x);
+            // 判断边是否与当前网格行有交集
+            if (e.ymax >= gridTopY && e.ymin <= gridBottomY) {
+                // 计算与网格上下边界的交点
+                if (e.ymin <= gridTopY && e.ymax >= gridTopY) {
+                    inters.push_back(e.x + (gridTopY - e.ymin) * e.dx);
+                }
+                if (e.ymin <= gridBottomY && e.ymax >= gridBottomY) {
+                    inters.push_back(e.x + (gridBottomY - e.ymin) * e.dx);
+                }
+                // 将包含在当前行内的线段端点也作为极值点加入
+                if (e.ymin >= gridTopY && e.ymin <= gridBottomY) {
+                    inters.push_back(e.x);
+                }
+                if (e.ymax >= gridTopY && e.ymax <= gridBottomY) {
+                    inters.push_back(e.x + (e.ymax - e.ymin) * e.dx);
+                }
             }
         }
+
         if (inters.empty()) continue;
-        std::sort(inters.begin(), inters.end());
-        for (size_t k = 0; k+1 < inters.size(); k += 2) {
-            int startX = static_cast<int>(std::ceil(inters[k]));
-            int endX = static_cast<int>(std::floor(inters[k+1]));
-            for (int x = startX; x <= endX; ++x) {
-                filled.push_back({x, y, 0.0});
-            }
+
+        // 3. 提取该行网格上的最小和最大 X 跨度
+        double minX = *std::min_element(inters.begin(), inters.end());
+        double maxX = *std::max_element(inters.begin(), inters.end());
+
+        // X轴向外取整，确保沾边的列也被包含
+        int startX = static_cast<int>(std::floor(minX));
+        int endX   = static_cast<int>(std::floor(maxX));
+
+        // 填充该行所有被触碰的网格
+        for (int x = startX; x <= endX; ++x) {
+            filled.push_back({x, y, 0.0});
         }
     }
     return filled;
 }
-
 /// @brief 从 JSON 格式的多边形顶点生成局部网格编码集合（立体填充）
 std::vector<std::string> getPolygonGridCodes(
     const std::string& polygonJson,
@@ -435,26 +473,50 @@ std::vector<std::string> getPolygonGridCodes(
     std::vector<std::pair<double,double>> coords;
     if (!parsePolygonJson(polygonJson, coords)) return {};
 
-    // 转换为网格坐标（使用底部高度作为平面转换参考）
-    std::vector<Point> gridVerts;
+    // 计算当前层级的经纬差和高差
+    double LDV = (baseTile.north - baseTile.south) / std::pow(2.0, level);
+    double LOV = (baseTile.east - baseTile.west) / std::pow(2.0, level);
+    double HDV = 78125.0 / std::pow(2.0, level); // 保持与基础库一致
+
+    // 1. 保留浮点精度转换为网格坐标
+    std::vector<PointDouble> gridVerts;
     gridVerts.reserve(coords.size());
-    uint32_t bottomLayer = 0, topLayer = 0;
+
     for (const auto& pr : coords) {
         double lon = pr.first;
         double lat = pr.second;
-        IJH ijh = localRowColHeiNumber(level, lon, lat, bottom, baseTile);
-        gridVerts.push_back({static_cast<int>(ijh.column), static_cast<int>(ijh.row), 0.0});
-        // compute top layer bound
-        IJH topIJH = localRowColHeiNumber(level, lon, lat, top, baseTile);
-        topLayer = std::max(topLayer, topIJH.layer);
+
+        double exact_row = (baseTile.north - lat) / LDV;
+        double exact_col = (lon - baseTile.west) / LOV;
+
+        // 处理跨越180度
+        if (baseTile.west < -180.0 && lon > 0.0) {
+            exact_col = (lon - baseTile.west - 360.0) / LOV;
+        }
+
+        gridVerts.push_back({exact_col, exact_row});
     }
 
-    auto filled2D = optimizedScanLineFillCpp(gridVerts);
+    // 2. 调用全新的保守光栅化算法获取2D面
+    auto filled2D = optimizedConservativeScanLineFill(gridVerts);
     if (filled2D.empty()) return {};
 
-    // compute bottom layer from bottom height
-    IJH tmp = localRowColHeiNumber(level, coords[0].first, coords[0].second, bottom, baseTile);
-    bottomLayer = tmp.layer;
+    // 3. 高度层级严格向外取整包围 (Z轴保守光栅化)
+    double relativeBottom = bottom - baseTile.bottom;
+    double relativeTop = top - baseTile.bottom;
+    if (relativeBottom < 0.0) relativeBottom = 0.0;
+    if (relativeTop < 0.0) relativeTop = 0.0;
+
+    uint32_t bottomLayer = static_cast<uint32_t>(std::floor(relativeBottom / HDV));
+    uint32_t topLayer = 0;
+    // 顶部使用 ceil 确保只要触碰到上一层，就把该层包进去。减1是因为层号是从底向上计算的边界索引
+    if (relativeTop > 0.0) {
+        topLayer = static_cast<uint32_t>(std::ceil(relativeTop / HDV)) - 1;
+    }
+    if (topLayer < bottomLayer || topLayer == static_cast<uint32_t>(-1)) topLayer = bottomLayer;
+
+    // 限制最大层号
+    if (topLayer >= (1u << level)) topLayer = (1u << level) - 1;
 
     // 优化：使用 IJH 结构体和多线程处理，减少内存占用和计算时间
     size_t total2D = filled2D.size();
@@ -557,31 +619,41 @@ std::vector<std::string> getPolygonSurfaceGridCodes(
     std::vector<std::pair<double,double>> coords;
     if (!parsePolygonJson(polygonJson, coords)) return {};
 
-    // 将多边形顶点转换为网格坐标（使用底部高度作为参考）
-    std::vector<Point> gridVerts;
+    double LDV = (baseTile.north - baseTile.south) / std::pow(2.0, level);
+    double LOV = (baseTile.east - baseTile.west) / std::pow(2.0, level);
+    double HDV = 78125.0 / std::pow(2.0, level);
+
+    std::vector<PointDouble> gridVerts;
     gridVerts.reserve(coords.size());
-    uint32_t bottomLayer = 0, topLayer = 0;
+
     for (const auto& pr : coords) {
         double lon = pr.first;
         double lat = pr.second;
-        IJH ijh = localRowColHeiNumber(level, lon, lat, bottom, baseTile);
-        gridVerts.push_back({static_cast<int>(ijh.column), static_cast<int>(ijh.row), 0.0});
-        IJH topIJH = localRowColHeiNumber(level, lon, lat, top, baseTile);
-        topLayer = std::max(topLayer, topIJH.layer);
+
+        double exact_row = (baseTile.north - lat) / LDV;
+        double exact_col = (lon - baseTile.west) / LOV;
+        if (baseTile.west < -180.0 && lon > 0.0) exact_col = (lon - baseTile.west - 360.0) / LOV;
+
+        gridVerts.push_back({exact_col, exact_row});
     }
 
-    // 生成水平面（上表面和下表面）所需的二维填充点（但只在顶面/底面层生成编码）
-    auto filled2D = optimizedScanLineFillCpp(gridVerts);
+    auto filled2D = optimizedConservativeScanLineFill(gridVerts);
 
-    // 计算底层编号
-    IJH tmp = localRowColHeiNumber(level, coords[0].first, coords[0].second, bottom, baseTile);
-    bottomLayer = tmp.layer;
+    // 高度层级严格包围
+    double relativeBottom = bottom - baseTile.bottom;
+    double relativeTop = top - baseTile.bottom;
+    if (relativeBottom < 0.0) relativeBottom = 0.0;
+    if (relativeTop < 0.0) relativeTop = 0.0;
 
-    // 去重容器
+    uint32_t bottomLayer = static_cast<uint32_t>(std::floor(relativeBottom / HDV));
+    uint32_t topLayer = 0;
+    if (relativeTop > 0.0) topLayer = static_cast<uint32_t>(std::ceil(relativeTop / HDV)) - 1;
+    if (topLayer < bottomLayer || topLayer == static_cast<uint32_t>(-1)) topLayer = bottomLayer;
+    if (topLayer >= (1u << level)) topLayer = (1u << level) - 1;
+
     std::unordered_set<std::string> uniqueCodes;
 
-    // 若没有有效填充点，则仍需要生成边界侧面（例如非常薄或线状多边形）
-    // 1) 添加上/下表面网格：对于每个填充2D点，仅在 topLayer 和 bottomLayer 添加编码
+    // 1) 添加上/下表面网格
     for (const auto& p : filled2D) {
         try {
             std::string topCode = IJH2DQG_str(static_cast<uint32_t>(p.y), static_cast<uint32_t>(p.x), topLayer, level);
@@ -593,22 +665,23 @@ std::vector<std::string> getPolygonSurfaceGridCodes(
         } catch(...) {}
     }
 
-    // 2) 添加侧面网格：遍历每条边，按像素/网格步长采样边上的单元，并在高度层上生成竖直条带
+    // 2) 添加侧面网格 (使用连续坐标插值确保侧边不透风)
     const size_t n = gridVerts.size();
     if (n >= 2) {
         for (size_t i = 0; i < n; ++i) {
             const auto& p0 = gridVerts[i];
             const auto& p1 = gridVerts[(i+1)%n];
-            int c0 = p0.x; int r0 = p0.y;
-            int c1 = p1.x; int r1 = p1.y;
-            int dc = c1 - c0;
-            int dr = r1 - r0;
-            int steps = std::max(std::abs(dc), std::abs(dr));
+            double c0 = p0.x; double r0 = p0.y;
+            double c1 = p1.x; double r1 = p1.y;
+
+            // 按照最长轴进行步进，确保在网格级别不会出现断层
+            int steps = static_cast<int>(std::max(std::ceil(std::abs(c1 - c0)), std::ceil(std::abs(r1 - r0)))) * 2;
             if (steps == 0) steps = 1;
+
             for (int s = 0; s <= steps; ++s) {
                 double t = static_cast<double>(s) / static_cast<double>(steps);
-                int col = static_cast<int>(std::round(c0 + t * dc));
-                int row = static_cast<int>(std::round(r0 + t * dr));
+                int col = static_cast<int>(std::floor(c0 + t * (c1 - c0))); // 向下取整落在对应网格
+                int row = static_cast<int>(std::floor(r0 + t * (r1 - r0)));
                 for (uint32_t h = bottomLayer; h <= topLayer; ++h) {
                     try {
                         std::string code = IJH2DQG_str(static_cast<uint32_t>(row), static_cast<uint32_t>(col), h, level);
@@ -619,7 +692,6 @@ std::vector<std::string> getPolygonSurfaceGridCodes(
         }
     }
 
-    // 将去重结果转为排序后的向量以保证稳定输出
     std::vector<std::string> out;
     out.reserve(uniqueCodes.size());
     for (const auto& s : uniqueCodes) out.push_back(s);

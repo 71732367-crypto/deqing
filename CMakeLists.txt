@@ -57,6 +57,8 @@ add_executable(${PROJECT_NAME} main.cc
         GridEvaluatorLib/GridEvaluator.h
         controller/LineToGrids.cpp
         controller/LineToGrids.h
+        controller/api_airRoute_smooth.cpp
+        controller/api_airRoute_smooth.h
 )
 
 # ##############################################################################
