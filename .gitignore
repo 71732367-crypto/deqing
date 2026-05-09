@@ -7,7 +7,7 @@ build_release/
 cmake-build-debug/
 cmake-build-release/
 
-dqglib/src/
+
 # Compiled object files
 *.o
 *.obj

@@ -85,9 +85,9 @@
              //name: Name of the client,'default' by default
              "name": "default",
              //host: Server IP, 127.0.0.1 by default
-             "host": "127.0.0.1",
+             "host": "192.168.3.4",
              //port: Server port, 6379 by default
-             "port": 6379,
+             "port": 9874,
              //username: '' by default which means 'default' in redis ACL
              "username": "",
              //passwd: '' by default
