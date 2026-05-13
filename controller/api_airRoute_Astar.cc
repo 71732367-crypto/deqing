@@ -187,28 +187,13 @@ AStarResult aStarPathSimple(
     }
     double dx2 = sx - ex, dy2 = sy - ey, dz2 = sz - ez;
     double lineLength = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
-    // 定义 A* 算法的启发式函数 (使用原生 std::sqrt 并加入 Tie-Breaker)
     auto heuristic = [&](int x, int y, int z) {
-        // 1. 基础物理距离
         double dx = x - ex, dy = y - ey, dz = z - ez;
         double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
 
-
-        // 如果起终点重合，直接返回
-        if (lineLength < 1e-6) return dist;
-        // 3. 叉乘计算
-        double crossX = dy * dz2 - dz * dy2;
-        double crossY = dz * dx2 - dx * dz2;
-        double crossZ = dx * dy2 - dy * dx2;
-
-        // 使用 std::sqrt 获取精确的叉乘面积和底边长
-        double crossMag = std::sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
-
-
-
-        // 4. 计算垂直偏离网格数并施加 0.001 的微小惩罚
-        double perpDist = crossMag / lineLength;
-        return dist + (perpDist * 0.001 * gridSize);
+        // 乘以 1.001 稍微放大 H 值。
+        // 这几乎没有任何性能损耗，但能立刻打破等价节点的平局，让寻路像“激光”一样直指目标。
+        return dist * 1.001;
     };
 
     // A*节点结构
@@ -244,7 +229,7 @@ AStarResult aStarPathSimple(
 
     int searchSteps = 0;
     const int MAX_SEARCH_STEPS = g_maxSearchSteps;
-    uint64_t maxCoord = (1ULL << (3 * level));
+    uint64_t maxCoord = (1ULL << (level));
 
     while (!openSet.empty()) {
         if (++searchSteps > MAX_SEARCH_STEPS) {
@@ -384,21 +369,10 @@ Task<AStarResult> aStarPath(
         double dx = x - ex, dy = y - ey, dz = z - ez;
         double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
 
-        if (lineLength < 1e-6) return dist;
-
-        double crossX = dy * dz2 - dz * dy2;
-        double crossY = dz * dx2 - dx * dz2;
-        double crossZ = dx * dy2 - dy * dx2;
-
-        double crossMag = std::sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
-
-
-
-
-        double perpDist = crossMag / lineLength;
-        return dist + (perpDist * 0.001 * gridSize);
+        // 乘以 1.001 稍微放大 H 值。
+        // 这几乎没有任何性能损耗，但能立刻打破等价节点的平局，让寻路像“激光”一样直指目标。
+        return dist * 1.001;
     };
-
     struct Node {
         int x, y, z;
         double g, h, f;
@@ -473,7 +447,7 @@ Task<AStarResult> aStarPath(
         validNeighbors.reserve(26);
         candidateListForChecker.reserve(26);
 
-        uint64_t maxCoord = (1ULL << (3 * level));
+        uint64_t maxCoord = (1ULL << (level));
 
         // 遍历 26 个方向
         for (size_t i = 0; i < DIRECTIONS.size(); ++i) {

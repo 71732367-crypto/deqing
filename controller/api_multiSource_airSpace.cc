@@ -407,7 +407,7 @@ void api_multiSource_airSpace::countFlyableGrids(const HttpRequestPtr& req, std:
                           "alt_max IS NOT NULL AND alt_min IS NOT NULL AND "
                           "alt_max >= $1 AND alt_min <= $2";
 
-        auto result = db->execSqlSync(sql, bottom, top);
+        auto result = db->execSqlSync(sql, (int)bottom, (int)top);
         
         LOG_INFO << "查询到 " << result.size() << " 个符合条件的禁飞区";
 
@@ -448,7 +448,7 @@ void api_multiSource_airSpace::countFlyableGrids(const HttpRequestPtr& req, std:
         // 对每个禁飞区进行处理
         for (size_t i = 0; i < result.size(); ++i) {
             // 获取禁飞区ID
-            int zoneId = result[i]["id"].as<int>();
+            long long zoneId = result[i]["id"].as<long long>();
             std::string boundaryStr = result[i]["boundary_data"].as<std::string>();
             std::string shape = result[i]["shape"].isNull() ? "1" : result[i]["shape"].as<std::string>();
 
