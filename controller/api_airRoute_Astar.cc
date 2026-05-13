@@ -111,27 +111,26 @@ struct GridKey {
     int x;
     int y;
     int z;
-    int dir; // 当前到达该网格的方向索引 (0-25)，-1 表示起点或无方向
+
 
     bool operator==(const GridKey& other) const {
-        return x == other.x && y == other.y && z == other.z && dir == other.dir;
+        return x == other.x && y == other.y && z == other.z;
     }
     bool operator!=(const GridKey& other) const {
         return !(*this == other);
     }
 };
 
-// 坐标键的哈希函数
-struct GridKeyHash {
-    std::size_t operator()(const GridKey& k) const {
-        std::size_t h = 17;
-        h = h * 31 + std::hash<int>()(k.x);
-        h = h * 31 + std::hash<int>()(k.y);
-        h = h * 31 + std::hash<int>()(k.z);
-        h = h * 31 + std::hash<int>()(k.dir);
-        return h;
-    }
-};
+    // 坐标键的哈希函数
+    struct GridKeyHash {
+        std::size_t operator()(const GridKey& k) const {
+            std::size_t h = 17;
+            h = h * 31 + std::hash<int>()(k.x);
+            h = h * 31 + std::hash<int>()(k.y);
+            h = h * 31 + std::hash<int>()(k.z);
+            return h;
+        }
+    };
 
 // A*算法配置选项
 struct AStarOptions {
@@ -186,13 +185,30 @@ AStarResult aStarPathSimple(
     if (sx < 0 || sy < 0 ||  ex < 0 || ey < 0 ) {
         return {false, {}, "行列坐标不能为负数"};
     }
-
-    // 启发式函数
+    double dx2 = sx - ex, dy2 = sy - ey, dz2 = sz - ez;
+    double lineLength = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
+    // 定义 A* 算法的启发式函数 (使用原生 std::sqrt 并加入 Tie-Breaker)
     auto heuristic = [&](int x, int y, int z) {
-        double dx = x - ex;
-        double dy = y - ey;
-        double dz = z - ez;
-        return newton(dx * dx + dy * dy + dz * dz) * gridSize;
+        // 1. 基础物理距离
+        double dx = x - ex, dy = y - ey, dz = z - ez;
+        double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
+
+
+        // 如果起终点重合，直接返回
+        if (lineLength < 1e-6) return dist;
+        // 3. 叉乘计算
+        double crossX = dy * dz2 - dz * dy2;
+        double crossY = dz * dx2 - dx * dz2;
+        double crossZ = dx * dy2 - dy * dx2;
+
+        // 使用 std::sqrt 获取精确的叉乘面积和底边长
+        double crossMag = std::sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+
+
+
+        // 4. 计算垂直偏离网格数并施加 0.001 的微小惩罚
+        double perpDist = crossMag / lineLength;
+        return dist + (perpDist * 0.001 * gridSize);
     };
 
     // A*节点结构
@@ -201,11 +217,11 @@ AStarResult aStarPathSimple(
         double g, h, f;
         GridKey key;
         size_t seq;
-        int consecutiveSteps; // 连续步数
+
 
         Node() = default;
-        Node(int x_, int y_, int z_, double g_, double h_, size_t s_, int dir_, int steps_)
-            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), key({x_, y_, z_, dir_}), seq(s_), consecutiveSteps(steps_) {}
+        Node(int x_, int y_, int z_, double g_, double h_, size_t s_)
+            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), key({x_, y_, z_}), seq(s_) {}
 
         bool operator>(const Node& o) const {
             if (abs(f - o.f) > 1e-6) return f > o.f;
@@ -214,7 +230,7 @@ AStarResult aStarPathSimple(
     };
 
     static size_t globalSeqSimple = 0;
-    GridKey startKey = {sx, sy, sz, -1}; // 起点无方向
+    GridKey startKey = {sx, sy, sz}; // 起点无方向
 
     priority_queue<Node, vector<Node>, greater<Node>> openSet;
     std::unordered_map<GridKey, Node, GridKeyHash> openMap;
@@ -222,7 +238,7 @@ AStarResult aStarPathSimple(
     std::unordered_map<GridKey, GridKey, GridKeyHash> parent;
 
     double h0 = heuristic(sx, sy, sz);
-    Node startNode(sx, sy, sz, 0.0, h0, globalSeqSimple++, -1, 0);
+    Node startNode(sx, sy, sz, 0.0, h0, globalSeqSimple++);
     openSet.push(startNode);
     openMap[startKey] = startNode;
 
@@ -275,25 +291,21 @@ AStarResult aStarPathSimple(
                 static_cast<uint64_t>(ny) >= maxCoord ||
                 static_cast<uint64_t>(nz) >= maxCoord) continue;
 
-            GridKey nKey = {nx, ny, nz, static_cast<int>(i)};
+            GridKey nKey = {nx, ny, nz};
             if (closedSet.count(nKey)) continue;
 
-            int nextSteps = (i == cur.key.dir) ? (cur.consecutiveSteps + 1) : 1;
+
             double moveDist = DIRECTION_DISTANCES[i] * gridSize;
 
-            // 简易版的转向惩罚（无障碍物不需要强迫8格，只需防蛇皮走位）
-            double turnPenalty = 0.0;
-            if (cur.key.dir != -1 && i != cur.key.dir) {
-                turnPenalty = 0.5 * gridSize;
-            }
 
-            double newG = cur.g + moveDist + turnPenalty;
+
+            double newG = cur.g + moveDist ;
 
             auto existing = openMap.find(nKey);
             if (existing != openMap.end() && newG >= existing->second.g) continue;
 
             double newH = heuristic(nx, ny, nz);
-            Node next(nx, ny, nz, newG, newH, globalSeqSimple++, static_cast<int>(i), nextSteps);
+            Node next(nx, ny, nz, newG, newH, globalSeqSimple++);
             openSet.push(next);
             openMap[nKey] = next;
             parent[nKey] = cur.key;
@@ -366,12 +378,25 @@ Task<AStarResult> aStarPath(
     // ==========================================
     // 2. A* 主循环 (引入运动学约束与终点特权)
     // ==========================================
-
+    double dx2 = sx - ex, dy2 = sy - ey, dz2 = sz - ez;
+    double lineLength = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
     auto heuristic = [&](int x, int y, int z) {
-        double dx = x - ex;
-        double dy = y - ey;
-        double dz = z - ez;
-        return newton(dx * dx + dy * dy + dz * dz) * gridSize;
+        double dx = x - ex, dy = y - ey, dz = z - ez;
+        double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
+
+        if (lineLength < 1e-6) return dist;
+
+        double crossX = dy * dz2 - dz * dy2;
+        double crossY = dz * dx2 - dx * dz2;
+        double crossZ = dx * dy2 - dy * dx2;
+
+        double crossMag = std::sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+
+
+
+
+        double perpDist = crossMag / lineLength;
+        return dist + (perpDist * 0.001 * gridSize);
     };
 
     struct Node {
@@ -380,11 +405,11 @@ Task<AStarResult> aStarPath(
         int arrivalTime;
         GridKey key;
         size_t seq;
-        int consecutiveSteps; // 在这个方向上已经连续走了几步
+
 
         Node() = default;
-        Node(int x_, int y_, int z_, double g_, double h_, int at_, size_t s_, int dir_, int steps_)
-            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), arrivalTime(at_), key({x_, y_, z_, dir_}), seq(s_), consecutiveSteps(steps_) {}
+        Node(int x_, int y_, int z_, double g_, double h_, int at_, size_t s_)
+            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), arrivalTime(at_), key({x_, y_, z_}), seq(s_) {}
 
         bool operator>(const Node& o) const {
             if (abs(f - o.f) > 1e-6) return f > o.f;
@@ -399,9 +424,9 @@ Task<AStarResult> aStarPath(
     std::unordered_map<GridKey, GridKey, GridKeyHash> parent;
 
     // 起点初始化：无方向(-1)，步数 0
-    GridKey startKey = {sx, sy, sz, -1};
+    GridKey startKey = {sx, sy, sz};
     double h0 = heuristic(sx, sy, sz) * weights.distance;
-    Node startNode(sx, sy, sz, 0.0, h0, startTime, globalSeq++, -1, 0);
+    Node startNode(sx, sy, sz, 0.0, h0, startTime, globalSeq++);
     openSet.push(startNode);
     openMap[startKey] = startNode;
 
@@ -442,7 +467,7 @@ Task<AStarResult> aStarPath(
         closedSet.insert(cur.key);
         openMap.erase(cur.key);
 
-        struct NeighborMeta { int x, y, z; string code; double moveCost; int arrival; int dirIndex; int consecutiveSteps; };
+        struct NeighborMeta { int x, y, z; string code; double moveCost; int arrival; };
         vector<NeighborMeta> validNeighbors;
         vector<CandidateInfo> candidateListForChecker;
         validNeighbors.reserve(26);
@@ -462,7 +487,7 @@ Task<AStarResult> aStarPath(
                 static_cast<uint64_t>(ny) >= maxCoord ||
                 static_cast<uint64_t>(nz) >= maxCoord) continue;
 
-            GridKey nKey = {nx, ny, nz, static_cast<int>(i)};
+            GridKey nKey = {nx, ny, nz};
             if (closedSet.count(nKey)) continue;
 
             double moveDist = DIRECTION_DISTANCES[i] * gridSize;
@@ -473,10 +498,8 @@ Task<AStarResult> aStarPath(
             IJH nextIJH = {(uint32_t)ny, (uint32_t)nx, (uint32_t)nz};
             string code = rchToCode(nextIJH, static_cast<uint8_t>(level));
 
-            // 追踪连续方向步数
-            int nextSteps = (i == cur.key.dir) ? (cur.consecutiveSteps + 1) : 1;
 
-            validNeighbors.push_back({nx, ny, nz, code, moveDist, arrival, static_cast<int>(i), nextSteps});
+            validNeighbors.push_back({nx, ny, nz, code, moveDist, arrival});
             candidateListForChecker.push_back({code, arrival, norm.wdTime, norm.wdRule, true});
         }
 
@@ -540,33 +563,18 @@ Task<AStarResult> aStarPath(
             double totalExtraFactor = effPenalty + safetyPenalty + riskPenalty + privacyPenalty;
             double extraCost = distanceCost * totalExtraFactor;
 
-            // --- 运动学转向惩罚与终点特权 ---
-            double turnPenalty = 0.0;
-            // 判断是否发生了转向 (且不是刚起飞)
-            if (cur.key.dir != -1 && nb.dirIndex != cur.key.dir) {
-                double distToEnd = heuristic(nb.x, nb.y, nb.z);
 
-                if (distToEnd < 8.0 * gridSize) {
-                    // 【终点特权】：距离终点不足 8 格时，允许自由调整姿态，免除惩罚
-                    turnPenalty = 0.0;
-                } else if (cur.consecutiveSteps < 6) {
-                    // 【短步变向惩罚】：步数不足 8 步就想转弯，给予高额阻力（相当于多飞 5 个网格的距离）
-                    turnPenalty = 2.0 * gridSize * weights.distance;
-                } else {
-                    // 【正常变向惩罚】：走够了 8 步，象征性收取少量变向费用，防止来回扭动
-                    turnPenalty = 0.5 * gridSize * weights.distance;
-                }
-            }
+
 
             // 总代价值汇总
-            double newG = cur.g + baseG + extraCost + turnPenalty;
+            double newG = cur.g + baseG + extraCost ;
 
-            GridKey nKey = {nb.x, nb.y, nb.z, nb.dirIndex};
+            GridKey nKey = {nb.x, nb.y, nb.z};
             auto existing = openMap.find(nKey);
             if (existing != openMap.end() && newG >= existing->second.g) continue;
 
             double newH = heuristic(nb.x, nb.y, nb.z) * weights.distance;
-            Node next(nb.x, nb.y, nb.z, newG, newH, nb.arrival, globalSeq++, nb.dirIndex, nb.consecutiveSteps);
+            Node next(nb.x, nb.y, nb.z, newG, newH, nb.arrival, globalSeq++);
             openSet.push(next);
             openMap[nKey] = next;
             parent[nKey] = cur.key;
@@ -759,7 +767,7 @@ Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
                 break;
             }
 
-            // 【重点】：抽绳算法 (String Pulling) 已彻底移除，直接累加 A* 的物理路径时间。
+
 
             if (!segmentResult.path.empty()) {
                 double stepGridSize = getGridSize(level);
@@ -771,7 +779,7 @@ Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
                     double dy = (int)p2.row - (int)p1.row;
                     double dz = (int)p2.layer - (int)p1.layer;
                     // 精确计算 26方向 实际发生的欧几里得距离，累加时间
-                    segmentDuration += static_cast<int>(newton(dx*dx + dy*dy + dz*dz) * stepGridSize / options.speed);
+                    segmentDuration += static_cast<int>(std::sqrt(dx*dx + dy*dy + dz*dz) * stepGridSize / options.speed);
                 }
                 currentSegmentStartTime += segmentDuration;
             }
@@ -834,8 +842,7 @@ Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
                     double dx = (int)p2.column - (int)p1.column;
                     double dy = (int)p2.row - (int)p1.row;
                     double dz = (int)p2.layer - (int)p1.layer;
-                    double dist = newton(dx*dx + dy*dy + dz*dz) * currentGridSize;
-
+                    double dist = std::sqrt(dx*dx + dy*dy + dz*dz) * currentGridSize;
                     exactTimeAcc += (dist / options.speed);
                 }
 

@@ -355,6 +355,6 @@
     //custom_config: custom configuration for users. This object can be get by the app().getCustomConfig() method.
     "custom_config": {
         "pg_table_name": "osgbgrid_${level}",
-        "max_search_steps": 200000
+        "max_search_steps": 400000
     }
 }
