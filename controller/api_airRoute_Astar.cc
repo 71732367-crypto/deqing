@@ -187,30 +187,26 @@ AStarResult aStarPathSimple(
     }
     double dx2 = sx - ex, dy2 = sy - ey, dz2 = sz - ez;
     double lineLength = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
+    // 定义 A* 算法的启发式函数 (使用原生 std::sqrt 并加入 Tie-Breaker)
     auto heuristic = [&](int x, int y, int z) {
         double dx = x - ex, dy = y - ey, dz = z - ez;
-        double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
-
-        // 乘以 1.001 稍微放大 H 值。
-        // 这几乎没有任何性能损耗，但能立刻打破等价节点的平局，让寻路像“激光”一样直指目标。
-        return dist * 1.001;
+        // 使用 std::sqrt 保证精度，乘以 1.3 的权重打破平衡，防止 A* 在空旷区盲目扩散
+        return std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize * 1.3;
     };
-
     // A*节点结构
     struct Node {
         int x, y, z;
         double g, h, f;
         GridKey key;
-        size_t seq;
+
 
 
         Node() = default;
         Node(int x_, int y_, int z_, double g_, double h_, size_t s_)
-            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), key({x_, y_, z_}), seq(s_) {}
+            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), key({x_, y_, z_}) {}
 
         bool operator>(const Node& o) const {
-            if (abs(f - o.f) > 1e-6) return f > o.f;
-            return seq > o.seq;
+            return f > o.f; // 只需要比较 f 值，性能更好
         }
     };
 
@@ -229,7 +225,7 @@ AStarResult aStarPathSimple(
 
     int searchSteps = 0;
     const int MAX_SEARCH_STEPS = g_maxSearchSteps;
-    uint64_t maxCoord = (1ULL << (level));
+    uint64_t maxCoord = (1ULL << (3 * level));
 
     while (!openSet.empty()) {
         if (++searchSteps > MAX_SEARCH_STEPS) {
@@ -365,33 +361,39 @@ Task<AStarResult> aStarPath(
     // ==========================================
     double dx2 = sx - ex, dy2 = sy - ey, dz2 = sz - ez;
     double lineLength = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
+
+    // [核心修改 1]：动态启发式权重 (Weighted A*)
+    // 默认 1.3 用于打破平衡；如果是 safest 模式，大幅提高权重以抵消巨大的 g(n) 惩罚
+    double hWeight = 2.5;
+    if (routeMode == RouteMode::SAFEST) {
+        hWeight = 5;             // 引力回调
+    }else  if(routeMode == RouteMode::BALANCED){
+       hWeight = 3;
+    }
+
     auto heuristic = [&](int x, int y, int z) {
         double dx = x - ex, dy = y - ey, dz = z - ez;
-        double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
-
-        // 乘以 1.001 稍微放大 H 值。
-        // 这几乎没有任何性能损耗，但能立刻打破等价节点的平局，让寻路像“激光”一样直指目标。
-        return dist * 1.001;
+        return std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize * hWeight;
     };
+
     struct Node {
         int x, y, z;
         double g, h, f;
         int arrivalTime;
         GridKey key;
-        size_t seq;
+
 
 
         Node() = default;
-        Node(int x_, int y_, int z_, double g_, double h_, int at_, size_t s_)
-            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), arrivalTime(at_), key({x_, y_, z_}), seq(s_) {}
+        Node(int x_, int y_, int z_, double g_, double h_, int at_)
+            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), arrivalTime(at_), key({x_, y_, z_}) {}
 
         bool operator>(const Node& o) const {
-            if (abs(f - o.f) > 1e-6) return f > o.f;
-            return seq > o.seq;
+            return f > o.f; // 只需要比较 f 值，性能更好
         }
     };
 
-    static size_t globalSeq = 0;
+
     priority_queue<Node, vector<Node>, greater<Node>> openSet;
     std::unordered_map<GridKey, Node, GridKeyHash> openMap;
     std::unordered_set<GridKey, GridKeyHash> closedSet;
@@ -400,7 +402,7 @@ Task<AStarResult> aStarPath(
     // 起点初始化：无方向(-1)，步数 0
     GridKey startKey = {sx, sy, sz};
     double h0 = heuristic(sx, sy, sz) * weights.distance;
-    Node startNode(sx, sy, sz, 0.0, h0, startTime, globalSeq++);
+    Node startNode(sx, sy, sz, 0.0, h0, startTime);
     openSet.push(startNode);
     openMap[startKey] = startNode;
 
@@ -447,7 +449,7 @@ Task<AStarResult> aStarPath(
         validNeighbors.reserve(26);
         candidateListForChecker.reserve(26);
 
-        uint64_t maxCoord = (1ULL << (level));
+        uint64_t maxCoord = (1ULL << (3 * level));
 
         // 遍历 26 个方向
         for (size_t i = 0; i < DIRECTIONS.size(); ++i) {
@@ -548,7 +550,7 @@ Task<AStarResult> aStarPath(
             if (existing != openMap.end() && newG >= existing->second.g) continue;
 
             double newH = heuristic(nb.x, nb.y, nb.z) * weights.distance;
-            Node next(nb.x, nb.y, nb.z, newG, newH, nb.arrival, globalSeq++);
+            Node next(nb.x, nb.y, nb.z, newG, newH, nb.arrival);
             openSet.push(next);
             openMap[nKey] = next;
             parent[nKey] = cur.key;

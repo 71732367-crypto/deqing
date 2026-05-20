@@ -30,32 +30,32 @@ static double toNumber(const Json::Value& v) {
     /**
      * @brief 解析类似 "(5,10]" 的区间字符串，并判断数值是否在区间内
      */
+    // === 优化版：数学区间解析器（零堆内存分配） ===
     static bool isValueInRange(const std::string& rangeStr, double val) {
-    if (rangeStr.empty() || rangeStr.length() < 3) return false;
+    if (rangeStr.length() < 5) return false; // 长度至少形如 (0,1)
 
-    // 1. 获取开闭符号
-    char leftOp = rangeStr.front(); // '[' 或 '('
-    char rightOp = rangeStr.back(); // ']' 或 ')'
+    char leftOp = rangeStr.front();
+    char rightOp = rangeStr.back();
 
-    // 2. 提取数字部分
-    std::string inner = rangeStr.substr(1, rangeStr.length() - 2);
-    size_t commaPos = inner.find(',');
-    if (commaPos == std::string::npos) return false;
+    // ✅ 核心修改 2：使用 C 底层的 strtod 和原生指针
+    // 坚决不用 substr 截取字符串，实现 0 次 Heap 内存分配
+    const char* start = rangeStr.c_str() + 1;
+    char* end;
 
-    // 3. 转换数字
-    try {
-        double minVal = std::stod(inner.substr(0, commaPos));
-        double maxVal = std::stod(inner.substr(commaPos + 1));
+    // 极速提取逗号前的第一个浮点数
+    double minVal = std::strtod(start, &end);
 
-        // 4. 逻辑判断
-        bool passLeft = (leftOp == '[') ? (val >= minVal) : (val > minVal);
-        bool passRight = (rightOp == ']') ? (val <= maxVal) : (val < maxVal);
+    // 格式安全保护，确保中间是逗号
+    if (*end != ',') return false;
 
-        return passLeft && passRight;
-    } catch (...) {
-        LOG_ERROR << "[GridEvaluator] 区间解析失败: " << rangeStr;
-        return false; // 解析异常当作不匹配
-    }
+    // 极速提取逗号后的第二个浮点数
+    double maxVal = std::strtod(end + 1, nullptr);
+
+    // 逻辑判断
+    bool passLeft = (leftOp == '[') ? (val >= minVal) : (val > minVal);
+    bool passRight = (rightOp == ']') ? (val <= maxVal) : (val < maxVal);
+
+    return passLeft && passRight;
 }
 
     // === 新增：动态代价提取器 ===
@@ -265,6 +265,7 @@ GridEvaluator::GridEvaluator(const Json::Value& options) {
             } else {
                 // === String 类型（简单存在性检查）===
                 group.type = "string";
+                meta.expectedValue = options[key];  // ← 加这行，保存完整的配置对象
                 group.rules.push_back(meta);
             }
         }
@@ -697,27 +698,29 @@ void GridEvaluator::checkCandidates(
                 if (r.type() == drogon::nosql::RedisResultType::kArray) {
                     auto arr = r.asArray();
                     lock_guard<mutex> lk(ctx->mutex);
-                    // 保存结果...
-                    // 【修改点 2】: 尝试将拿到的文本解析为 JSON 对象
-                       for (size_t i=0; i<arr.size() && i<stringKeys.size(); ++i) {
-                           string val = "";
-                           Json::Value jVal(Json::nullValue);
-                           if (!arr[i].isNil()) {
-                               val = arr[i].asString();
 
-                               // 新增 JSON 反序列化逻辑
-                               Json::CharReaderBuilder builder;
-                               std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-                               std::string errs;
-                               bool isJson = reader->parse(val.c_str(), val.c_str() + val.length(), &jVal, &errs);
+                    // ✅ 核心修改 1：将 JSON 解析器的创建移到 for 循环外部！
+                    // 整个批次回调只创建一次，彻底消灭海量堆内存分配
+                    Json::CharReaderBuilder builder;
+                    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+                    std::string errs; // 错误信息也放外面复用
 
-                               // 如果解析失败（比如它是 dc 规则的纯文本），就回退为普通字符串
-                               if (!isJson) {
-                                   jVal = val;
-                               }
-                           }
-                           ctx->results.push_back({stringKeys[i], jVal});
-                       }
+                    for (size_t i=0; i<arr.size() && i<stringKeys.size(); ++i) {
+                        string val = "";
+                        Json::Value jVal(Json::nullValue);
+                        if (!arr[i].isNil()) {
+                            val = arr[i].asString();
+
+                            // ✅ 复用外面的 reader 进行极速解析
+                            bool isJson = reader->parse(val.c_str(), val.c_str() + val.length(), &jVal, &errs);
+
+                            // 如果解析失败（比如它是 dc 规则的纯文本），就回退为普通字符串
+                            if (!isJson) {
+                                jVal = val;
+                            }
+                        }
+                        ctx->results.push_back({stringKeys[i], jVal});
+                    }
                 }
                 ctx->checkDone();
             },

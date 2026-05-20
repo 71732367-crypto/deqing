@@ -5,7 +5,7 @@
 ***
 
 
-**最后更新**: 2026 年 1 月 12 日
+**最后更新**: 2026 年 5 月 18 日
 
 **适用环境**: 生产环境
 
@@ -244,8 +244,7 @@ chmod -R 777 deployment/
 ``` region.json
 {
   "region": {
-    "name": "德清县",  // 区域名称
-    // 区域边界坐标
+    "name": "德清县研究区域",
     "bounds": {
       "southwest": {
         "longitude": 119.8436725825645226,
@@ -263,9 +262,16 @@ chmod -R 777 deployment/
         "longitude": 120.1128929038345632,
         "latitude": 30.4995322056211791
       }
+
+    },
+    "height": {
+      "bottom":0,
+
+      "top": 600
     }
   }
-}
+  }
+
 ```
 
 #### 1.2.3 docker-compose.yml - 编排配置文件
