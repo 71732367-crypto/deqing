@@ -39,6 +39,7 @@ namespace api {
         // === 2. 枚举类：定义寻路模式 ===
         // enum class 是 C++11 的强类型枚举，比传统的 enum 更安全，防止命名冲突
         enum class RouteMode {
+            ORIGINAL = 0, // 原始 A* (无算路因子影响)
             SHORTEST=1,   // 最短路径 (对应 weight_value1)
             SAFEST=2,     // 风险最低 (对应 weight_value2)
             BALANCED=3    // 综合最优 (对应 weight_value3)
@@ -46,14 +47,14 @@ namespace api {
         //获取对应模式的权重配置
         static RouteWeights getWeightsByMode(RouteMode mode) {
             if (mode == RouteMode::SHORTEST) {
-                // 对应 weight_value1
                 return {0.5, 0.15, 0.0338, 0.0263, 0.015, 0.0203, 0.0081, 0.0054, 0.0045, 0.0036, 0.0032, 0.03, 0.1, 0.1};
             } else if (mode == RouteMode::SAFEST) {
-                // 对应 weight_value2
                 return {0.15, 0.1, 0.0563, 0.0438, 0.025, 0.0338, 0.0135, 0.009, 0.0075, 0.006, 0.0053, 0.05, 0.35, 0.15};
-            } else {
-                // 对应 weight_value3 (BALANCED)
+            } else if (mode == RouteMode::BALANCED) {
                 return {0.25, 0.15, 0.045, 0.035, 0.02, 0.027, 0.0108, 0.0072, 0.006, 0.0048, 0.0042, 0.04, 0.25, 0.15};
+            } else {
+                // 默认 ORIGINAL: 100% 依赖物理距离，无视所有附加代价
+                return {1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
             }
         }
         struct CandidateInfo {

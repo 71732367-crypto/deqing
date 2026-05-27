@@ -1,7 +1,7 @@
 # 基于 Ubuntu 24.04 LTS，提供稳定性和长期支持
 # 安全等级：企业级
 # 优化措施：构建阶段安全加固 + 精细化权限控制 + 启动脚本安全增强
-# 修复说明：修正Ubuntu 24.04库包名称问题
+# 修复说明：切换清华大学(TUNA)镜像源，并增加 apt-get 网络容错机制
 
 # ================================
 # 构建阶段
@@ -13,47 +13,41 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CMAKE_BUILD_TYPE=Release
 ENV MAKEFLAGS=-j$(nproc)
 
-# 更新包管理器并安装构建依赖
+# 🚀 替换为清华大学 (TUNA) 镜像源
+RUN sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/ubuntu.sources && \
+    sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/ubuntu.sources
+
+# 更新包管理器并安装构建依赖 (增加 --fix-missing 容错)
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    # 基础构建工具\
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --fix-missing \
     build-essential \
     cmake \
     git \
     pkg-config \
     wget \
-    curl \
     unzip \
-    # C++ 编译器支持\
+    curl \
+    ca-certificates \
     g++ \
     gcc \
-    # Drogon 框架依赖\
     libjsoncpp-dev \
     libhiredis-dev \
     libssl-dev \
     zlib1g-dev \
-    # PostgreSQL 客户端库\
     libpq-dev \
     postgresql-client \
-    # TBB库 (Intel Threading Building Blocks)\
     libtbb-dev \
-    # OpenSceneGraph 依赖\
     libopenscenegraph-dev \
     libopenthreads-dev \
-    # 图像处理库\
     libtiff-dev \
     libjpeg-dev \
     libpng-dev \
-    # 地理投影库基础依赖 (手动构建PROJ)\
     libsqlite3-dev \
     sqlite3 \
     libcurl4-openssl-dev \
     libgeos-dev \
     libgeos++-dev \
-    # UUID库\
     uuid-dev \
-    # 其他工具\
-    ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -101,46 +95,28 @@ RUN mkdir build && \
 # ================================
 # 构建阶段安全加固 - 关键步骤
 # ================================
-# 1. 保存需要保留的配置文件和目录
 RUN cd /app && \
-    # 保存配置文件和目录到临时位置\
     mkdir -p /tmp/keep && \
     cp -r config.json /tmp/keep/ 2>/dev/null || true && \
     cp -r configs /tmp/keep/ 2>/dev/null || true && \
-    # 彻底清理源代码\
     rm -rf * && \
     rm -rf /app/drogon && \
     rm -rf /app/build && \
-    # 恢复需要保留的配置文件和目录\
     mv /tmp/keep/* /app/ || true && \
     rm -rf /tmp/keep && \
-    # 清理其他临时文件\
     rm -rf /tmp/* && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 2. 清理构建工具和依赖
 RUN apt-get remove --purge -y \
-    build-essential \
-    cmake \
-    git \
-    pkg-config \
-    wget \
-    curl \
-    unzip \
-    g++ \
-    gcc \
+    build-essential cmake git pkg-config wget curl unzip g++ gcc \
     && apt-get autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 3. 验证清理结果
 RUN ls -la /app && \
     echo "构建阶段安全加固完成 - 源代码已清理"
 
-# ================================
-# 运行阶段
-# ================================
 # ================================
 # 运行阶段
 # ================================
@@ -150,24 +126,26 @@ FROM ubuntu:24.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 
-# 安装基础运行时依赖
+# 🚀 替换为清华大学 (TUNA) 镜像源
+RUN sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/ubuntu.sources && \
+    sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/ubuntu.sources
+
+# 安装基础运行时依赖 (增加 --fix-missing 容错)
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --fix-missing \
     ca-certificates \
     curl \
-    libjsoncpp25 \
-    libhiredis1.1.0 \
-    libssl3 \
+    libjsoncpp-dev \
+    libhiredis-dev \
+    libssl-dev \
     libpq5 \
-    libtbbmalloc2 \
-    libopenscenegraph161 \
-    libopenthreads21 \
-    libtiff6 \
+    libtbb-dev \
+    libopenscenegraph-dev \
+    libtiff-dev \
     libjpeg-turbo8 \
-    libpng16-16 \
+    libpng-dev \
     libsqlite3-0 \
-    libgeos-c1t64 \
-    libgeos3.12.1t64 \
+    libgeos-dev \
     uuid-runtime \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -208,20 +186,14 @@ ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/x86_64-linux-gnu
 RUN mkdir -p /app/uploads /app/logs /app/tmp
 
 RUN \
-    # 配置文件 - 只读
     chown root:root /app/configs && \
     chmod 555 /app/configs && \
     chown root:root /app/config.json /app/region.json /app/config.json.template && \
     chmod 444 /app/config.json /app/region.json /app/config.json.template && \
-    # 数据目录 - appuser可读写
     chown -R appuser:appuser /app/data /app/uploads /app/logs /app/tmp && \
     chmod 700 /app/data /app/uploads /app/logs /app/tmp && \
-    # 工作目录 - root所有，但允许其他人进入和读取
     chown root:root /app && \
     chmod 755 /app
-
-RUN ls -la /app && \
-    echo "权限设置完成"
 
 # ================================
 # 启动脚本
@@ -229,41 +201,26 @@ RUN ls -la /app && \
 RUN echo '#!/bin/bash' > /app/start.sh && \
     echo '' >> /app/start.sh && \
     echo '# 安全启动脚本' >> /app/start.sh && \
-    # 1. Root检查
     echo 'if [ "$(id -u)" -eq 0 ]; then' >> /app/start.sh && \
     echo '    echo "⚠️  Switching to appuser..."' >> /app/start.sh && \
     echo '    exec su - appuser -c "/app/start.sh"' >> /app/start.sh && \
     echo '    exit 1' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
-    echo '' >> /app/start.sh && \
-    # 2. 配置文件 config.json 检查
     echo 'if [ ! -f /app/config.json ]; then' >> /app/start.sh && \
     echo '    echo "❌  错误：config.json 未找到"' >> /app/start.sh && \
     echo '    exit 1' >> /app/start.sh && \
-    echo 'else' >> /app/start.sh && \
-    echo '    echo "ℹ️  信息: config.json 存在"' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
-    echo '' >> /app/start.sh && \
-    # 3. 配置文件 region.json 检查
     echo 'if [ ! -f /app/region.json ]; then' >> /app/start.sh && \
     echo '    echo "❌  错误：region.json 未找到"' >> /app/start.sh && \
     echo '    exit 1' >> /app/start.sh && \
-    echo 'else' >> /app/start.sh && \
-    echo '    echo "ℹ️  信息: 配置文件 region.json 检查存在"' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
-    echo '' >> /app/start.sh && \
-    # 4. 目录权限检查
     echo 'if [ ! -w /app/data ]; then' >> /app/start.sh && \
     echo '    echo "❌  错误：数据目录不可写"' >> /app/start.sh && \
     echo '    exit 1' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
-    echo '' >> /app/start.sh && \
-    # 5. LD_LIBRARY_PATH 检查
     echo 'if [ -z "$LD_LIBRARY_PATH" ]; then' >> /app/start.sh && \
     echo '    export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/x86_64-linux-gnu' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
-    echo '' >> /app/start.sh && \
-    # 6. 启动应用
     echo 'echo "✅  Deqing Serve 正在启动..."' >> /app/start.sh && \
     echo 'cd /app' >> /app/start.sh && \
     echo 'exec /usr/local/bin/deqing_serve' >> /app/start.sh && \

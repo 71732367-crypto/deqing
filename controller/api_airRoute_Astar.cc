@@ -5,6 +5,7 @@
 #include <dqg/DQG3DProximity.h>
 #include <dqg/GlobalBaseTile.h>
 #include "LineToGrids.h"
+
 #include <iostream>
 #include <vector>
 #include <queue>
@@ -44,7 +45,7 @@ void initializeAstarConfig() {
 }
 
 // === 辅助函数与结构 ===
-
+/*
 // 牛顿迭代法求平方根，用于计算欧几里得距离
 static double newton(double num, int iters = 5) {
     if (num <= 0) return 0.0;
@@ -52,6 +53,7 @@ static double newton(double num, int iters = 5) {
     for (int i = 0; i < iters; ++i) x = 0.5 * (x + num / x);
     return x;
 }
+*/
 
 // 根据层级获取网格大小（单位：米）
 double getGridSize(int level) {
@@ -364,11 +366,14 @@ Task<AStarResult> aStarPath(
 
     // [核心修改 1]：动态启发式权重 (Weighted A*)
     // 默认 1.3 用于打破平衡；如果是 safest 模式，大幅提高权重以抵消巨大的 g(n) 惩罚
-    double hWeight = 2.5;
+
+    double hWeight = 1.3;
     if (routeMode == RouteMode::SAFEST) {
-        hWeight = 5;             // 引力回调
-    }else  if(routeMode == RouteMode::BALANCED){
-       hWeight = 3;
+        hWeight = 5.0;
+    } else if (routeMode == RouteMode::BALANCED) {
+        hWeight = 3.0;
+    } else if (routeMode == RouteMode::SHORTEST) {
+        hWeight = 2.0;
     }
 
     auto heuristic = [&](int x, int y, int z) {
@@ -559,7 +564,94 @@ Task<AStarResult> aStarPath(
 
     co_return {false, {}, lastFailReason};
 }
+//----------------------------抽稀函数--------------------------------------
+    Task<vector<string>> thinPathGreedy(
+        const vector<string>& originalPath, //存取抽稀前路径
+        std::shared_ptr<GridEvaluator> evaluator, // 修复：统一变量名为 evaluator
+        int startTime,
+        uint8_t level
+    )
+    {
+        if (originalPath.size() <= 2) co_return originalPath;
+        vector<string> smoothPath; //存储平滑后的结果
+        smoothPath.push_back(originalPath[0]); //将起点存入平滑路径
+        size_t currentIndex = 0; //当前节点
+        size_t targetIndex = 2; //相隔一个网格的节点
+        const BaseTile& baseTile = ::getProjectBaseTile(); // 获取基准瓦片范围，用于坐标转换
+        uint64_t maxCoord = (1ull << (3 * level)); //用于边界检测
+        int currentTime = getBeijingTime(); //用于时间规则统一
 
+        while (targetIndex < originalPath.size())
+        {
+            //获取物理坐标并调用DDA射线算法
+            LatLonHei p1 = getLocalTileLatLon(originalPath[currentIndex], baseTile); //获取当前点坐标
+            LatLonHei p2 = getLocalTileLatLon(originalPath[targetIndex], baseTile); //获取目标点的坐标
+            std::vector<std::array<double, 3>> lineReq{  //记录p1和p2的经纬高
+                {p1.longitude, p1.latitude, p1.height},
+                {p2.longitude, p2.latitude, p2.height}
+            };
+            std::vector<std::string> lineGrids = singleLineToGrids2(lineReq, level, baseTile); //拉取直线
+            //26个方向膨胀建立缓冲区
+            std::unordered_set<std::string> expandedGridSet;
+            for (const auto& code : lineGrids)
+            {
+                expandedGridSet.insert(code); //加入中心网格
+                IJH centerIJH = getLocalTileRHC(code);
+                int cx = centerIJH.column;
+                int cy = centerIJH.row;
+                int cz = centerIJH.layer;
+                //扩展26个邻居保持一格宽缓冲区
+                for (const auto& d : DIRECTIONS)
+                {
+                    int nx = cx + d[0];
+                    int ny = cy + d[1];
+                    int nz = cz + d[2];
+                    // 边界保护：兼容负高度和坐标越界
+                    if (nx < 0 || ny < 0 || nz < 0) continue;
+                    if (static_cast<uint64_t>(nx) >= maxCoord || static_cast<uint64_t>(ny) >= maxCoord || static_cast<uint64_t>(nz) >= maxCoord) continue;
+                    IJH nIjh = {(uint32_t)ny, (uint32_t)nx, (uint32_t)nz};
+                    expandedGridSet.insert(rchToCode(nIjh, level));
+                }
+            }
+
+            // ================= 修复核心：循环分离 =================
+            // 1. 先把所有要校验的网格塞进数组
+            vector<CandidateInfo> checkCands;
+            auto norm = normalizeGridTime(startTime, currentTime);
+            for (const auto& code : expandedGridSet)
+            {
+                checkCands.push_back({code, startTime, norm.wdTime, norm.wdRule, true});
+            }
+            // 注意：装填数据的 for 循环在这里结束了！
+
+            // 2. 挂起协程，统一等待 Redis 批量校验完成
+            auto checkResultsPtr = co_await GridCheckAwaiter{evaluator, checkCands};
+            // 3. 双指针判定与滑动机制
+            bool isLineSafe = true;
+            for (const auto& code : expandedGridSet) {
+                if (checkResultsPtr->count(code) && !checkResultsPtr->at(code).pass)
+                {
+                    isLineSafe = false; // 只要缓冲区里有一个网格违规，这条视线就被否决
+                    break;
+                }
+            }
+
+            if (isLineSafe)
+            {
+                targetIndex++;
+            }
+            else
+            {
+                // 不安全撞墙了，退回到上一个确认安全的点作为必经拐点
+                smoothPath.push_back(originalPath[targetIndex - 1]);
+                //将退回的节点当作下一次探索的起点
+                currentIndex = targetIndex - 1;
+                targetIndex = currentIndex + 2;
+            }
+        }
+        smoothPath.push_back(originalPath.back());
+        co_return smoothPath;
+    }
 // === 接口实现 ===
 Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
                                  std::function<void (const drogon::HttpResponsePtr &)> callback)
@@ -690,15 +782,19 @@ Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
         AStarOptions options;
         options.speed = cruisingSpeed;
 
-        RouteMode currentMode = RouteMode::BALANCED;
+        RouteMode currentMode = RouteMode::ORIGINAL; //默认为原始A星
         if (jsonBody->isMember("route_type")) {
             std::string reqMode = (*jsonBody)["route_type"].asString();
             if (reqMode == "shortest") currentMode = RouteMode::SHORTEST;
             else if (reqMode == "safest") currentMode = RouteMode::SAFEST;
+            else if (reqMode == "balanced") currentMode = RouteMode::BALANCED;
+            else if (reqMode == "original") currentMode = RouteMode::ORIGINAL;
         } else if (jsonBody->isMember("mode")) {
             std::string reqMode = (*jsonBody)["mode"].asString();
             if (reqMode == "shortest") currentMode = RouteMode::SHORTEST;
             else if (reqMode == "safest") currentMode = RouteMode::SAFEST;
+            else if (reqMode == "balanced") currentMode = RouteMode::BALANCED;
+            else if (reqMode == "original") currentMode = RouteMode::ORIGINAL;
         }
 
         Json::Value ruleOptions;
@@ -742,8 +838,11 @@ Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
                 failReason = segmentResult.reason;
                 break;
             }
-
-
+            //调用平滑函数
+            if (!isUnconstrained && !segmentResult.path.empty() && gridEvaluator) {
+                LOG_INFO << "[A*] 航段 " << i+1 << " 开始执行A*航线抽稀...";
+                segmentResult.path = co_await thinPathGreedy(segmentResult.path, gridEvaluator, currentSegmentStartTime, level);
+            }
 
             if (!segmentResult.path.empty()) {
                 double stepGridSize = getGridSize(level);

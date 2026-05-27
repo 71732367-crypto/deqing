@@ -1,26 +1,15 @@
+# 设置最低CMake版本要求和项目名称
 cmake_minimum_required(VERSION 3.10)
 project(deqing_serve CXX)
-
-link_directories("D:/vcpkg/installed/x64-windows/debug/lib")
-link_directories("D:/vcpkg/installed/x64-windows/lib")
-
-if(MSVC)
-    add_compile_options("/utf-8")
-    add_definitions(-D_USE_MATH_DEFINES)
-    add_definitions(-DNOMINMAX)
-    add_definitions(-DJSON_DLL) #  解决 LNK2001 的 Json::null 报错
-endif()
 
 # ##############################################################################
 # 编译器和C++标准配置
 # ##############################################################################
 
-# 强制使用 C++20
 set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ standard to use" FORCE)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 检测编译器支持的协程标志
 include(CheckCXXCompilerFlag)
 set(COROUTINES_FLAG "")
 check_cxx_compiler_flag("-fcoroutines" HAS_CORO_FLAG)
@@ -37,7 +26,30 @@ if(COROUTINES_FLAG)
     add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${COROUTINES_FLAG}>")
 endif()
 
+include(CheckIncludeFileCXX)
+check_include_file_cxx(coroutine HAS_COROUTINE)
+if(NOT HAS_COROUTINE)
+    message(WARNING "Compiler does not support C++20 coroutines, but we are using C++20 anyway")
+endif()
+
 message(STATUS "Using C++20 standard (required by Drogon framework)")
+
+# ##############################################################################
+# 子目录优先构建（必须在 find_package 之前，避免 SQLite3_lib 目标重复创建）
+# dqglib 依赖 PROJ，PROJ 依赖 SQLite3，需要让它先占用 SQLite3_lib 目标名
+# ##############################################################################
+
+add_subdirectory(dqglib)
+
+# ##############################################################################
+# 外部库依赖配置（dqglib 之后，保证 SQLite3_lib 只创建一次）
+# ##############################################################################
+
+find_package(SQLite3 REQUIRED)
+find_package(Drogon CONFIG REQUIRED)
+find_package(TBB REQUIRED)
+find_package(PostgreSQL REQUIRED)
+find_package(GEOS REQUIRED)
 
 # ##############################################################################
 # 可执行文件定义和源文件列表
@@ -57,84 +69,67 @@ add_executable(${PROJECT_NAME} main.cc
         GridEvaluatorLib/GridEvaluator.h
         controller/LineToGrids.cpp
         controller/LineToGrids.h
-
 )
 
 # ##############################################################################
-# 外部库依赖配置
+# 链接库
 # ##############################################################################
-
-# 1. 先查找 SQLite3 基础库
-find_package(SQLite3 REQUIRED)
-
-# 2. 安全地创建 SQLite3_lib 目标（防止 Drogon 和 PROJ 冲突）
-# 使用 if(NOT TARGET) 保护，而不是重写 add_library 命令
-if(NOT TARGET SQLite3_lib)
-    add_library(SQLite3_lib INTERFACE IMPORTED)
-    set_target_properties(SQLite3_lib PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${SQLite3_INCLUDE_DIRS}"
-            INTERFACE_LINK_LIBRARIES "SQLite::SQLite3")
-    message(STATUS "Created SQLite3_lib interface target")
-endif()
-
-# 3. 查找核心框架和依赖
-find_package(Drogon CONFIG REQUIRED)
-find_package(TBB REQUIRED)
-find_package(PostgreSQL REQUIRED)
-find_package(GEOS REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(jsoncpp CONFIG REQUIRED)
-find_package(unofficial-sqlite3 CONFIG REQUIRED)
-
-
-# 链接项目所需的库
-# 建议使用 JsonCpp::jsoncpp (vcpkg 标准用法) 替代裸写的 jsoncpp
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-        dqglib
         Drogon::Drogon
+        dqglib
         TBB::tbb
-        PostgreSQL::PostgreSQL
-        GEOS::geos
-        GEOS::geos_c
-        unofficial::sqlite3::sqlite3
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        JsonCpp::JsonCpp
-)
+        ${PostgreSQL_LIBRARIES}
+        geos
+        geos_c)
+
+# ##############################################################################
+# 验证C++标准
+# ##############################################################################
+
+if (CMAKE_CXX_STANDARD LESS 20)
+    message(FATAL_ERROR "C++20 or higher is required for Drogon framework")
+else ()
+    message(STATUS "Using C++20")
+endif ()
+
+# ##############################################################################
+# 源码目录扫描
+# ##############################################################################
+
+file(GLOB MODEL_SRC "models/*.cc")
+list(REMOVE_ITEM MODEL_SRC "models/GridData.cc")
 
 # ##############################################################################
 # 包含目录和源文件配置
 # ##############################################################################
 
 target_include_directories(${PROJECT_NAME}
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+        PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/models
         ${CMAKE_CURRENT_SOURCE_DIR}/GridEvaluatorLib
         dqglib/include
         ${PostgreSQL_INCLUDE_DIRS}
-        ${GEOS_INCLUDE_DIRS}
-)
+        ${GEOS_INCLUDE_DIRS})
 
-# 处理 models 目录下的源文件
-file(GLOB MODEL_SRC "models/*.cc")
-if(MODEL_SRC)
-    list(REMOVE_ITEM MODEL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/models/GridData.cc")
-    target_sources(${PROJECT_NAME} PRIVATE ${MODEL_SRC})
-endif()
+target_sources(${PROJECT_NAME}
+        PRIVATE
+        ${SRC_DIR}
+        ${MODEL_SRC})
 
 # ##############################################################################
-# 子目录构建配置
+# 测试子目录
 # ##############################################################################
-
-add_subdirectory(dqglib)
 
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/CMakeLists.txt")
     add_subdirectory(test)
+else()
+    message(STATUS "No test/CMakeLists.txt found; skipping add_subdirectory(test)")
 endif()
 
 # ##############################################################################
-# 安装规则配置
+# 安装规则
 # ##############################################################################
 
 install(TARGETS ${PROJECT_NAME}
@@ -142,14 +137,15 @@ install(TARGETS ${PROJECT_NAME}
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)
 
-# 安装配置文件
-foreach(CONF_FILE config.json config.yaml region.json)
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${CONF_FILE}")
-        install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/${CONF_FILE}" DESTINATION share/${PROJECT_NAME})
-    endif()
-endforeach()
-
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config.json")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/config.json" DESTINATION share/${PROJECT_NAME})
+endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config.yaml")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/config.yaml" DESTINATION share/${PROJECT_NAME})
+endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/region.json")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/region.json" DESTINATION share/${PROJECT_NAME})
+endif()
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/data")
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/" DESTINATION share/${PROJECT_NAME}/data)
 endif()
-
