@@ -653,8 +653,27 @@ Task<AStarResult> aStarPath(
         co_return smoothPath;
     }
 // === 接口实现 ===
-Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
-                                 std::function<void (const drogon::HttpResponsePtr &)> callback)
+    // 1. 公开接口：原始路径 (原有的接口，保持向后兼容)
+    Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
+                                     std::function<void (const drogon::HttpResponsePtr &)> callback)
+{
+    // 调用私有核心方法，传入 false 表示不进行抽稀处理
+    co_await processPathRequest(req, callback, false);
+}
+
+    // 2. 公开接口：抽稀路径 (新增的接口)
+    Task<void> Astar::SmoothAstarPathPlane(const drogon::HttpRequestPtr req,
+                                           std::function<void (const drogon::HttpResponsePtr &)> callback)
+{
+    // 调用私有核心方法，传入 true 表示开启 thinPathGreedy 抽稀逻辑
+    co_await processPathRequest(req, callback, true);
+}
+
+    // 3. 私有核心逻辑：承载原本的 A* 寻路与路径处理代码
+    Task<void> Astar::processPathRequest(const drogon::HttpRequestPtr req,
+                                         std::function<void (const drogon::HttpResponsePtr &)> callback,
+                                         bool applySmoothing)
+
 {
     auto jsonBody = req->getJsonObject();
     if (!jsonBody) {
@@ -838,12 +857,11 @@ Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
                 failReason = segmentResult.reason;
                 break;
             }
-            //调用平滑函数
-            if (!isUnconstrained && !segmentResult.path.empty() && gridEvaluator) {
+            // 调用平滑函数 (根据 applySmoothing 标志决定是否执行)
+            if (applySmoothing && !isUnconstrained && !segmentResult.path.empty() && gridEvaluator) {
                 LOG_INFO << "[A*] 航段 " << i+1 << " 开始执行A*航线抽稀...";
                 segmentResult.path = co_await thinPathGreedy(segmentResult.path, gridEvaluator, currentSegmentStartTime, level);
             }
-
             if (!segmentResult.path.empty()) {
                 double stepGridSize = getGridSize(level);
                 int segmentDuration = 0;

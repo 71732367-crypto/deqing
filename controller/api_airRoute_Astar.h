@@ -45,7 +45,7 @@ namespace api
             // 请求方法: POST
             // 请求体格式: JSON
             METHOD_ADD(Astar::AstarPathPlane, "AstarPathPlane", Post);
-
+            METHOD_ADD(Astar::SmoothAstarPathPlane, "SmoothAstarPathPlane", Post);
             // === 路由映射表结束 ===
             METHOD_LIST_END
 
@@ -71,6 +71,16 @@ namespace api
             //   - 适合处理耗时的路径计算任务
             static Task<void> AstarPathPlane(const drogon::HttpRequestPtr req,
                                   std::function<void (const drogon::HttpResponsePtr &)> callback);
+            // 处理抽稀/平滑 A* 请求
+            static Task<void> SmoothAstarPathPlane(const drogon::HttpRequestPtr req,
+                                  std::function<void (const drogon::HttpResponsePtr &)> callback);
+
+        private:
+            // 核心路径规划逻辑，提取复用
+            // 参数 applySmoothing 决定是否在生成航点后调用 thinPathGreedy
+            static Task<void> processPathRequest(const drogon::HttpRequestPtr req,
+                                  std::function<void (const drogon::HttpResponsePtr &)> callback,
+                                  bool applySmoothing);
         };
 
         // === A* 算法全局配置 ===
