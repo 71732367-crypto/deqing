@@ -48,6 +48,9 @@ RUN apt-get update && \
     libgeos-dev \
     libgeos++-dev \
     uuid-dev \
+    libgdal-dev \
+    gdal-bin \
+    libproj-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -59,18 +62,8 @@ COPY . .
 RUN mkdir -p /app/configs /app/data && \
     echo '{"region":{"name":"默认区域","bounds":{"southwest":{"longitude":0,"latitude":0},"northwest":{"longitude":0,"latitude":0},"northeast":{"longitude":0,"latitude":0},"southeast":{"longitude":0,"latitude":0}}}' > /app/configs/region.json.template
 
-# 手动构建 PROJ 库 (解决CMake配置文件问题)
-RUN wget https://download.osgeo.org/proj/proj-9.2.1.tar.gz && \
-    tar -xzf proj-9.2.1.tar.gz && \
-    cd proj-9.2.1 && \
-    mkdir build && \
-    cd build && \
-    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_TESTING=OFF -DENABLE_CURL=OFF -DBUILD_PROJSYNC=OFF && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig && \
-    cd /app && \
-    rm -rf proj-9.2.1 proj-9.2.1.tar.gz
+# 【注意：这里已经删除了手动下载和编译 PROJ 9.2.1 的冗长步骤】
+# 系统现在会直接使用上面通过 apt-get 安装的、与 GDAL 版本完美匹配的 libproj-dev
 
 # 在容器中下载并构建 Drogon 框架
 RUN git config --global http.version HTTP/1.1 && \
@@ -147,6 +140,9 @@ RUN apt-get update && \
     libsqlite3-0 \
     libgeos-dev \
     uuid-runtime \
+    libgdal-dev \
+    gdal-bin \
+    libproj-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

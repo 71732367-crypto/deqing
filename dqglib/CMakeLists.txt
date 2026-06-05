@@ -13,7 +13,7 @@ find_package(TIFF REQUIRED)
 
 # 查找 ZLIB 库
 find_package(ZLIB REQUIRED)
-
+find_package(GDAL REQUIRED)
 # 查找 jsoncpp 库
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
@@ -161,7 +161,7 @@ include_directories(include)
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 # 添加PlanCheckLib目录的源文件
 file(GLOB_RECURSE HEADERS "include/*.h" "include/*.hpp")
-
+file(GLOB_RECURSE SOURCES "src/*.cpp" "src/*.cc")
 # 排除主函数文件
 list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/OSGtoCode.cpp")
 
@@ -184,6 +184,9 @@ target_link_libraries(${PROJECT_NAME}
         ZLIB::ZLIB
         ${PROJ_LIBRARIES}
         ${JSONCPP_LIBRARIES}
+        PUBLIC              # <--- 新增 PUBLIC，确保依赖传递给主程序
+        ${GDAL_LIBRARY}     # <--- 改为单数
+
 )
 
 # 设置包含目录
@@ -191,6 +194,7 @@ target_include_directories(${PROJECT_NAME}
         PRIVATE
         ${OPENSCENEGRAPH_INCLUDE_DIRS}
         ${JSONCPP_INCLUDE_DIRS}
+        ${GDAL_INCLUDE_DIRS}
 )
 
 # 设置公共头文件目录，使其他项目可以包含这些头文件

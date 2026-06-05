@@ -19,7 +19,7 @@
 #include <utility>
 #include <memory>
 #include <cstdlib>
-
+#include "TIFF.h"
 using namespace drogon;
 using namespace std;
 
@@ -180,13 +180,36 @@ AStarResult aStarPathSimple(
     } catch (const exception& e) {
         return {false, {}, string("不支持的 level: ") + to_string(level)};
     }
-
+    // === [新增] 获取全局基础瓦片 ===
+    const BaseTile& baseTile = ::getProjectBaseTile();
     int sx = start[0], sy = start[1], sz = start[2];
     int ex = end[0], ey = end[1], ez = end[2];
 
     if (sx < 0 || sy < 0 ||  ex < 0 || ey < 0 ) {
         return {false, {}, "行列坐标不能为负数"};
     }
+    // ==========================================
+    // [新增] 起点/终点 120米真高前置校验
+    // ==========================================
+    auto checkNodeTrueHeight = [&](int x, int y, int z, const string& pointName) -> string {
+        IJH ijh = {(uint32_t)y, (uint32_t)x, (uint32_t)z};
+        string code = rchToCode(ijh, static_cast<uint8_t>(level));
+        LatLonHei boundary = getLocalTileLatLon(code, baseTile);
+        float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+        float tHeight = boundary.height - ground;
+
+        // 注意：真高计算 (boundary.height - ground) 天然兼容负数海拔(如水下/低洼区)
+        if (tHeight > 120.0f) return pointName + "超出空域限制，超出120米真高适飞空域";
+        if (tHeight < 15.0f) return pointName + "低于15米安全真高，存在撞地危险";
+        return "";
+    };
+
+    string startErr = checkNodeTrueHeight(sx, sy, sz, "起点");
+    if (!startErr.empty()) return {false, {}, startErr};
+
+    string endErr = checkNodeTrueHeight(ex, ey, ez, "终点");
+    if (!endErr.empty()) return {false, {}, endErr};
+    // ==========================================
     double dx2 = sx - ex, dy2 = sy - ey, dz2 = sz - ez;
     double lineLength = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
     // 定义 A* 算法的启发式函数 (使用原生 std::sqrt 并加入 Tie-Breaker)
@@ -228,7 +251,7 @@ AStarResult aStarPathSimple(
     int searchSteps = 0;
     const int MAX_SEARCH_STEPS = g_maxSearchSteps;
     uint64_t maxCoord = (1ULL << (3 * level));
-
+    string failReason = "未找到路径"; // [新增] 追踪失败原因
     while (!openSet.empty()) {
         if (++searchSteps > MAX_SEARCH_STEPS) {
             return {false, {}, "路径计算超时: 搜索范围过大"};
@@ -276,7 +299,25 @@ AStarResult aStarPathSimple(
 
             GridKey nKey = {nx, ny, nz};
             if (closedSet.count(nKey)) continue;
+            // ==========================================
+            // [新增] 简化版的物理真高安全限制
+            // ==========================================
+            IJH nextIJH = {(uint32_t)ny, (uint32_t)nx, (uint32_t)nz};
+            string code = rchToCode(nextIJH, static_cast<uint8_t>(level));
+            LatLonHei boundary = getLocalTileLatLon(code, baseTile);
 
+            float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+            float trueHeight = boundary.height - groundElevation;
+
+            if (trueHeight > 120.0f) {
+                failReason = "超出空域限制，超出120米真高适飞空域";
+                continue;
+            }
+            if (trueHeight < 15.0f) {
+                failReason = "低于15米安全真高，存在撞地危险";
+                continue;
+            }
+            // ==========================================
 
             double moveDist = DIRECTION_DISTANCES[i] * gridSize;
 
@@ -311,7 +352,8 @@ Task<AStarResult> aStarPath(
     RouteMode routeMode
 ) {
     int currentTime = getBeijingTime();
-
+    // === [新增] 获取全局基础瓦片，用于后续的网格与经纬度转换 ===
+    const BaseTile& baseTile = ::getProjectBaseTile();
     double gridSize;
     try {
         gridSize = getGridSize(level);
@@ -336,6 +378,21 @@ Task<AStarResult> aStarPath(
     // 1. 起点/终点 基础有效性检查
     // ==========================================
     {
+        // [新增] 独立真高校验，防止起终点直接违规
+        auto checkNodeTrueHeight = [&](const string& code, const string& pointName) -> string {
+            LatLonHei boundary = getLocalTileLatLon(code, baseTile);
+            float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+            float tHeight = boundary.height - ground;
+            if (tHeight > 120.0f) return pointName + "超出空域限制，超出120米真高适飞空域";
+            if (tHeight < 15.0f) return pointName + "低于15米安全真高，存在撞地危险";
+            return "";
+        };
+
+        string startHeightErr = checkNodeTrueHeight(startCode, "起点");
+        if (!startHeightErr.empty()) co_return {false, {}, startHeightErr};
+
+        string endHeightErr = checkNodeTrueHeight(endCode, "终点");
+        if (!endHeightErr.empty()) co_return {false, {}, endHeightErr};
         auto startNorm = normalizeGridTime(startTime, currentTime);
         CandidateInfo startCand = { startCode, startTime, startNorm.wdTime, startNorm.wdRule, true };
         CandidateInfo endCand = { endCode, 0, 0, "", false };
@@ -467,7 +524,6 @@ Task<AStarResult> aStarPath(
             if (static_cast<uint64_t>(nx) >= maxCoord ||
                 static_cast<uint64_t>(ny) >= maxCoord ||
                 static_cast<uint64_t>(nz) >= maxCoord) continue;
-
             GridKey nKey = {nx, ny, nz};
             if (closedSet.count(nKey)) continue;
 
@@ -479,7 +535,33 @@ Task<AStarResult> aStarPath(
             IJH nextIJH = {(uint32_t)ny, (uint32_t)nx, (uint32_t)nz};
             string code = rchToCode(nextIJH, static_cast<uint8_t>(level));
 
+            // ==========================================
+            // [新增] 120米适飞区与防撞地真高校验
+            // ==========================================
 
+            // 1. 将邻居网格编码转换为实际的经纬度和绝对高度
+            LatLonHei boundary = getLocalTileLatLon(code, baseTile);
+
+            // 2. 从 TiffReader 获取此经纬度下的真实地面高程
+            float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+
+            // 3. 计算相对高差(真高)。
+            // 算法天然兼容负数高程（如水下测绘或低洼盆地），
+            // 假设无人机网格绝对高度 20m，地面海拔 -50m，真高为 20 - (-50) = 70m。
+            float trueHeight = boundary.height - groundElevation;
+            // 4. 适飞区判定限制：最高 120 米，最低安全距离 5 米
+            float maxFlyableTrueHeight = 120.0f;
+            float minSafeTrueHeight = 15.0f;
+
+            if (trueHeight > maxFlyableTrueHeight) {
+                lastFailReason = "路径受阻: 前方超出空域限制，超出120米真高适飞空域";
+                continue;
+            }
+            if (trueHeight < minSafeTrueHeight) {
+                lastFailReason = "路径受阻: 前方低于15米安全真高，存在撞地危险";
+                continue;
+            }
+            // ==========================================
             validNeighbors.push_back({nx, ny, nz, code, moveDist, arrival});
             candidateListForChecker.push_back({code, arrival, norm.wdTime, norm.wdRule, true});
         }
@@ -629,6 +711,17 @@ Task<AStarResult> aStarPath(
             // 3. 双指针判定与滑动机制
             bool isLineSafe = true;
             for (const auto& code : expandedGridSet) {
+                // 【新增】真高安全校验：拉直的视线绝不能越过 120m 适飞区或 15m 撞地红线
+                LatLonHei boundary = getLocalTileLatLon(code, baseTile);
+                float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+                float tHeight = boundary.height - ground;
+
+                if (tHeight > 120.0f || tHeight < 15.0f) {
+                    isLineSafe = false;
+                    break;
+                }
+
+                // 规则校验
                 if (checkResultsPtr->count(code) && !checkResultsPtr->at(code).pass)
                 {
                     isLineSafe = false; // 只要缓冲区里有一个网格违规，这条视线就被否决
@@ -736,67 +829,96 @@ Task<AStarResult> aStarPath(
             callback(resp); co_return;
         }
 
-        double workHeight = (*jsonBody)["workHeight"].asDouble();
+       double workHeight = (*jsonBody)["workHeight"].asDouble();
 
+        // ==========================================
+        // [修改 1]：起飞垂直航线 (verticalPath)
+        // ==========================================
         vector<string> verticalPath;
-        int workLayer = 0;
+        int startWorkLayer = 0;
         if (pointsArr.size() > 0) {
             Json::Value firstPoint = pointsArr[0];
             double lon = firstPoint[0].asDouble();
             double lat = firstPoint[1].asDouble();
-            double originalHeight = firstPoint[2].asDouble();
+            double originalHeight = firstPoint[2].asDouble(); // 起点地面海拔
 
-            double absoluteWorkHeight = originalHeight + workHeight;
+            double absoluteWorkHeight = originalHeight + workHeight; // 起点绝对作业海拔
             IJH workIJH = localRowColHeiNumber(static_cast<uint8_t>(level), lon, lat, absoluteWorkHeight, baseTile);
-            workLayer = static_cast<int>(workIJH.layer);
+            startWorkLayer = static_cast<int>(workIJH.layer);
 
             IJH originalIJH = localRowColHeiNumber(static_cast<uint8_t>(level), lon, lat, originalHeight, baseTile);
             int col = static_cast<int>(originalIJH.column);
             int row = static_cast<int>(originalIJH.row);
             int originalLayer = static_cast<int>(originalIJH.layer);
 
-            if (originalLayer > workLayer) {
-                for (int h = originalLayer; h >= workLayer; --h) {
+            if (originalLayer > startWorkLayer) {
+                for (int h = originalLayer; h >= startWorkLayer; --h) {
                     IJH ijh = {(uint32_t)row, (uint32_t)col, (uint32_t)h};
                     verticalPath.push_back(rchToCode(ijh, static_cast<uint8_t>(level)));
                 }
             } else {
-                for (int h = originalLayer; h <= workLayer; ++h) {
+                for (int h = originalLayer; h <= startWorkLayer; ++h) {
                     IJH ijh = {(uint32_t)row, (uint32_t)col, (uint32_t)h};
                     verticalPath.push_back(rchToCode(ijh, static_cast<uint8_t>(level)));
                 }
             }
         }
 
+        // ==========================================
+        // [修改 2]：降落垂直航线 (landingPath) - 动态终点高度
+        // ==========================================
         vector<string> landingPath;
         if (pointsArr.size() > 1) {
             Json::Value lastPoint = pointsArr[pointsArr.size() - 1];
             double endLon = lastPoint[0].asDouble();
             double endLat = lastPoint[1].asDouble();
-            double endHeight = lastPoint[2].asDouble();
+            double endHeight = lastPoint[2].asDouble(); // 终点地面海拔
 
+            // 计算终点地面层
             IJH endOriginalIJH = localRowColHeiNumber(static_cast<uint8_t>(level), endLon, endLat, endHeight, baseTile);
             int endCol = static_cast<int>(endOriginalIJH.column);
             int endRow = static_cast<int>(endOriginalIJH.row);
             int endOriginalLayer = static_cast<int>(endOriginalIJH.layer);
 
-            if (workLayer > endOriginalLayer) {
-                for (int h = workLayer - 1; h >= endOriginalLayer; --h) {
+            // 计算终点的高空作业层 (终点地面 + workHeight)
+            double endAbsoluteWorkHeight = endHeight + workHeight;
+            IJH endWorkIJH = localRowColHeiNumber(static_cast<uint8_t>(level), endLon, endLat, endAbsoluteWorkHeight, baseTile);
+            int endWorkLayer = static_cast<int>(endWorkIJH.layer);
+
+            if (endWorkLayer > endOriginalLayer) {
+                for (int h = endWorkLayer - 1; h >= endOriginalLayer; --h) {
                     IJH ijh = {(uint32_t)endRow, (uint32_t)endCol, (uint32_t)h};
                     landingPath.push_back(rchToCode(ijh, static_cast<uint8_t>(level)));
                 }
             }
-            else if (workLayer < endOriginalLayer) {
-                for (int h = workLayer + 1; h <= endOriginalLayer; ++h) {
+            else if (endWorkLayer < endOriginalLayer) {
+                for (int h = endWorkLayer + 1; h <= endOriginalLayer; ++h) {
                     IJH ijh = {(uint32_t)endRow, (uint32_t)endCol, (uint32_t)h};
                     landingPath.push_back(rchToCode(ijh, static_cast<uint8_t>(level)));
                 }
             }
         }
 
-        for (auto& wp : waypoints) {
-            wp[2] = workLayer;
+        // ==========================================
+        // [修改 3]：仿地飞行航路点 Z 轴分配 (核心修复)
+        // ==========================================
+        for (size_t i = 0; i < waypoints.size(); ++i) {
+            Json::Value point = pointsArr[static_cast<int>(i)];
+            double groundHeight = point[2].asDouble(); // 提取该点自身的地面海拔
+
+            // 目标海拔 = 该点地面海拔 + 作业高度 (实现完美贴地)
+            double absoluteTargetHeight = groundHeight + workHeight;
+
+            IJH wpIJH = localRowColHeiNumber(static_cast<uint8_t>(level),
+                                             point[0].asDouble(),
+                                             point[1].asDouble(),
+                                             absoluteTargetHeight,
+                                             baseTile);
+            waypoints[i][2] = static_cast<int>(wpIJH.layer);
         }
+
+        // 为了兼容后续调用 A* 时传入的 workLayer 参数，将其指向起点的作业层
+        int workLayer = startWorkLayer;
 
         AStarOptions options;
         options.speed = cruisingSpeed;
@@ -940,33 +1062,41 @@ Task<AStarResult> aStarPath(
                 }
 
                 LatLonHei boundary = getLocalTileLatLon(code, baseTile);
+                if (applySmoothing) {
+                    // 1. 抽稀接口专属返回格式：仅保留 [lon, lat, height]
+                    Json::Value pointArray(Json::arrayValue);
+                    pointArray.append(boundary.longitude);
+                    pointArray.append(boundary.latitude);
+                    pointArray.append(boundary.height);
+                    results["path"].append(pointArray);
+                }else{
+                    Json::Value gridInfo;
+                    Json::Value centerArray(Json::arrayValue);
+                    centerArray.append(boundary.longitude);
+                    centerArray.append(boundary.latitude);
+                    centerArray.append(boundary.height);
+                    gridInfo["center"] = centerArray;
+                    gridInfo["minlon"] = boundary.west;
+                    gridInfo["maxlon"] = boundary.east;
+                    gridInfo["minlat"] = boundary.south;
+                    gridInfo["maxlat"] = boundary.north;
+                    gridInfo["top"] = boundary.top;
+                    gridInfo["bottom"] = boundary.bottom;
+                    gridInfo["code"] = code;
+                    gridInfo["interopCode"] = toInteropLocalCode(code, static_cast<uint8_t>(level));
 
-                Json::Value gridInfo;
-                Json::Value centerArray(Json::arrayValue);
-                centerArray.append(boundary.longitude);
-                centerArray.append(boundary.latitude);
-                centerArray.append(boundary.height);
-                gridInfo["center"] = centerArray;
-                gridInfo["minlon"] = boundary.west;
-                gridInfo["maxlon"] = boundary.east;
-                gridInfo["minlat"] = boundary.south;
-                gridInfo["maxlat"] = boundary.north;
-                gridInfo["top"] = boundary.top;
-                gridInfo["bottom"] = boundary.bottom;
-                gridInfo["code"] = code;
-                gridInfo["interopCode"] = toInteropLocalCode(code, static_cast<uint8_t>(level));
+                    gridInfo["arrivalTime"] = static_cast<int>(exactTimeAcc);
+                    gridInfo["pathIndex"] = finalPathIndexes[i];
 
-                gridInfo["arrivalTime"] = static_cast<int>(exactTimeAcc);
-                gridInfo["pathIndex"] = finalPathIndexes[i];
+                    if (finalIsVertical[i]) gridInfo["isVertical"] = true;
+                    if (i == 0) gridInfo["isStart"] = true;
+                    if (i == finalPath.size() - 1) gridInfo["isEnd"] = true;
+                    if (std::find(waypointCodes.begin(), waypointCodes.end(), code) != waypointCodes.end()) {
+                        gridInfo["isWaypoint"] = true;
+                    }
 
-                if (finalIsVertical[i]) gridInfo["isVertical"] = true;
-                if (i == 0) gridInfo["isStart"] = true;
-                if (i == finalPath.size() - 1) gridInfo["isEnd"] = true;
-                if (std::find(waypointCodes.begin(), waypointCodes.end(), code) != waypointCodes.end()) {
-                    gridInfo["isWaypoint"] = true;
+                    results["path"].append(gridInfo);
                 }
-
-                results["path"].append(gridInfo);
             }
             response["results"] = results;
             callback(HttpResponse::newHttpJsonResponse(response));

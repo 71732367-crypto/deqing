@@ -1,3 +1,4 @@
+#include "models/TIFF.h"
 #include <drogon/drogon.h>
 #include <dqg/DQG3DBasic.h>
 #include <dqg/GlobalBaseTile.h>
@@ -6,7 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <clocale>
-
+#include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -103,7 +104,6 @@ int main() {
     
     // 初始化 A* 算法配置（从 config.json 加载）
     api::airRoute::initializeAstarConfig();
-    
     // ==========================================
     // 全局 CORS 跨域配置开始
     // ==========================================
@@ -131,125 +131,82 @@ int main() {
         res->addHeader("Access-Control-Allow-Origin", "*");
     });
 
-
-// ==============================================================
-    // ✨ 新增：服务端启动时的“全量规则深度穿透测试”
-    // 一次性扫描 hl, gd, ad, wdd, fxq 等所有规则类别
+    // ==============================================================
+    //  服务端启动时的“TIFF 高程文件加载与状态检查”
     // ==============================================================
     drogon::app().registerBeginningAdvice([]() {
-        LOG_INFO << "==========================================";
-        LOG_INFO << "正在执行 Redis 全量规则字段深度测试...";
+         LOG_INFO << "==========================================";
+         LOG_INFO << "正在初始化 TIFF 高程数据...";
 
-        auto redisClient = drogon::app().getRedisClient();
-        if (!redisClient) {
-            LOG_FATAL << "致命错误：Redis 客户端未配置！";
-            exit(1);
-        }
+         std::string tiffFilePath = "";
 
-        // 我们指定一个网格编码进行测试 (请确保 Redis 里有这个网格的数据)
-        std::string testGrid = "30122136420";
+         // 1. 从 Drogon 的 custom_config 中读取文件路径
+         try {
+             const Json::Value& customConfig = drogon::app().getCustomConfig();
+             if (customConfig.isMember("tiff_file_path")) {
+                 tiffFilePath = customConfig["tiff_file_path"].asString();
+                 LOG_INFO << "已从 config.json 提取 TIFF 路径: " << tiffFilePath;
+             } else {
+                 // 如果 JSON 里忘写了，给个默认后备路径
+                 tiffFilePath = "./data/dem.tif";
+                 LOG_WARN << "config.json 中未配置 tiff_file_path，使用默认路径: " << tiffFilePath;
+             }
+         } catch (const std::exception& e) {
+             tiffFilePath = "./data/dem.tif";
+             LOG_ERROR << "解析 custom_config 异常: " << e.what() << "，退回默认路径: " << tiffFilePath;
+         }
 
-        // ---------------------------------------------------------
-        // 1. 测试所有的 String 类型 (红线约束 & 离散代价)
-        // ---------------------------------------------------------
-        std::vector<std::string> stringPrefixes = {
-            "hl", "hlz", "fx", "gd", "dt", "dz", "za", "dc", "tx", "dh", "jk"
-        };
-        for (const auto& p : stringPrefixes) {
-            // hlz 规则在底层实际查询的是 hl
-            std::string queryPrefix = (p == "hlz") ? "hl" : p;
-            std::string key = queryPrefix + "_" + testGrid;
+         // 2. 传递给 TiffReader 进行初始化
+         bool isTiffLoaded = TiffReader::getInstance().init(tiffFilePath);
 
-            redisClient->execCommandAsync(
-                [key, p](const drogon::nosql::RedisResult &r) {
-                    if (!r.isNil()) {
-                        LOG_INFO << "√[String测试] 成功读取 [" << p << "] -> 示例值: " << r.asString();
-                    } else {
-                        LOG_WARN << "X[String测试] 缺失 [" << p << "] 数据 (Key: " << key << ")";
-                    }
-                },
-                [](const std::exception &err) {}, "GET %s", key.c_str()
-            );
-        }
-
-        // ---------------------------------------------------------
-           // 2. 测试所有的 Set 类型 (空域检查)
-           // ---------------------------------------------------------
-           std::string setKey = "ad_" + testGrid;
-           redisClient->execCommandAsync(
-               [setKey](const drogon::nosql::RedisResult &r) {
-                   // ✨ 增加拦截：不仅要是数组，而且数组不能为空！
-                   if (!r.isNil() && r.type() == drogon::nosql::RedisResultType::kArray && !r.asArray().empty()) {
-                       LOG_INFO << "√[Set测试] 成功读取空域 [ad] -> 包含 " << r.asArray().size() << " 个元素";
-                   } else {
-                       LOG_WARN << "X[Set测试] 缺失空域 [ad] 数据 (Key: " << setKey << ")";
-                   }
-               },
-               [](const std::exception &err) {}, "SMEMBERS %s", setKey.c_str()
-           );
-
-           // ---------------------------------------------------------
-           // 3. 测试所有的 Hash 类型 (气象数据、隐私区)
-           // ---------------------------------------------------------
-           std::vector<std::string> hashPrefixes = {"wdd", "wdh", "privacy"};
-           for (const auto& p : hashPrefixes) {
-               std::string key = p + "_" + testGrid;
-               redisClient->execCommandAsync(
-                   [key, p](const drogon::nosql::RedisResult &r) {
-                       // ✨ 增加拦截：不仅要是数组，而且数组不能为空！(HGETALL 返回 key-value 交替的数组)
-                       if (!r.isNil() && r.type() == drogon::nosql::RedisResultType::kArray && !r.asArray().empty()) {
-                           LOG_INFO << "√[Hash测试] 成功读取字典 [" << p << "] -> 获取到完整 Hash 结构，包含 "
-                                    << r.asArray().size() / 2 << " 个键值对";
-                       } else {
-                           LOG_WARN << "X[Hash测试] 缺失字典 [" << p << "] 数据 (Key: " << key << ")";
-                       }
-                   },
-                   [](const std::exception &err) {}, "HGETALL %s", key.c_str()
-               );
-           }
-
-        // ---------------------------------------------------------
-        // 4. 测试 JSON-String 类型 (离散风险评估 fxq)
-        // ---------------------------------------------------------
-        std::string fxqKey = "fxq_" + testGrid;
-        redisClient->execCommandAsync(
-            [fxqKey](const drogon::nosql::RedisResult &r) {
-                if (r.isNil()) {
-                    LOG_WARN << "X[JSON测试] 缺失 [fxq] 风险区数据 (Key: " << fxqKey << ")";
-                    return;
-                }
-
-                std::string jsonStr = r.asString();
-                Json::Value jVal;
-                Json::CharReaderBuilder builder;
-                std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-                std::string errs;
-
-                if (reader->parse(jsonStr.c_str(), jsonStr.c_str() + jsonStr.length(), &jVal, &errs)) {
-                    LOG_INFO << "√[JSON测试] 成功解析 [fxq] 字典！开始提取所有风险时间字段:";
-
-                    std::vector<std::string> fxqFields = {
-                        "workday_low_risk_time", "workday_mid_risk_time", "workday_high_risk_time",
-                        "weekend_low_risk_time", "weekend_mid_risk_time", "weekend_high_risk_time",
-                        "holiday_low_risk_time", "holiday_mid_risk_time", "holiday_high_risk_time"
-                    };
-
-                    for(const auto& f : fxqFields) {
-                        if (jVal.isMember(f)) {
-                            LOG_INFO << "   √成功提取 [" << f << "] -> " << jVal[f].asString();
-                        } else {
-                            LOG_WARN << "   X缺失字段 [" << f << "]";
-                        }
-                    }
-                } else {
-                    LOG_ERROR << "X [JSON测试] 解析 [fxq] 失败！底层原因: " << errs;
-                }
-                LOG_INFO << "==========================================";
-            },
-            [](const std::exception &err) {}, "GET %s", fxqKey.c_str()
-        );
-    });
+         if (!isTiffLoaded) {
+             LOG_WARN << "------------------------------------------";
+             LOG_WARN << "警告: TIFF 高程文件加载失败或未找到！路径: " << tiffFilePath;
+             LOG_WARN << "警告: 当前系统处于【未使用 TIFF 文件获取真高】状态！";
+             LOG_WARN << "注意: 航线规划中的防撞地与 120m 适飞区绝对真高校验将被降级处理。";
+             LOG_WARN << "------------------------------------------";
+         } else {
+             LOG_INFO << "TIFF 高程文件加载成功！真高防撞系统已激活。";
+         }
+         LOG_INFO << "==========================================";
+     });
     // ==============================================================
+    //  服务端启动时的“Redis 纯连接探活检查
+    // ==============================================================
+    drogon::app().registerBeginningAdvice([]() {
+          LOG_INFO << "==========================================";
+          LOG_INFO << "正在检查 Redis 连接状态...";
+
+          auto redisClient = drogon::app().getRedisClient();
+          if (!redisClient) {
+              LOG_FATAL << "错误：config.json 中未配置 Redis 客户端！";
+              exit(1);
+          }
+
+          auto hasResponded = std::make_shared<bool>(false);
+
+          // 1. 发送 PING 命令
+          redisClient->execCommandAsync(
+              [hasResponded](const drogon::nosql::RedisResult &r) {
+                  *hasResponded = true;
+                  LOG_INFO << "Redis 真实连接成功！(服务器响应: " << r.asString() << ")";
+                  LOG_INFO << "==========================================";
+              },
+              [hasResponded](const std::exception &err) {
+                  *hasResponded = true;
+                  LOG_ERROR << "错误：Redis 连接失败！底层报错: " << err.what();
+              },
+              "PING"
+          );
+
+          // 2. 超时看门狗（精简版）
+          drogon::app().getLoop()->runAfter(3.0, [hasResponded]() {
+              if (!(*hasResponded)) {
+                  LOG_ERROR << "错误：Redis 连接超时 ";
+                  LOG_INFO << "==========================================";
+              }
+          });
+      });
     //Set HTTP listener address and port
     // Note: The port in config.json will be used, this is just a fallback
     drogon::app().addListener("0.0.0.0", 9997);

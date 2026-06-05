@@ -432,10 +432,17 @@ struct AsyncContext {
                         if (ruleKey != cand.wdRule) continue;
                     }
 
-                    // 截取网格编码适配层级
+                    // 先截取网格编码适配层级，保证层级匹配
                     string sliceCode = cand.code;
-                    if (cand.code.length() > (size_t)group.level) {
-                        sliceCode = cand.code.substr(0, group.level);
+                    if (sliceCode.length() > (size_t)group.level) {
+                        sliceCode = sliceCode.substr(0, group.level);
+                    }
+
+                    // 【修复核心】：在适配后的安全层级上进行地面投影，实现绝对拦截
+                    if (prefix == "dz" || prefix == "ad") {
+                        IJH ijh = getLocalTileRHC(sliceCode);
+                        ijh.layer = 0;
+                        sliceCode = rchToCode(ijh, static_cast<uint8_t>(sliceCode.length()));
                     }
 
                     // 构造当前规则在 Redis 缓存中的键名，拦截 hlz 重定向到 hl
@@ -621,11 +628,18 @@ void GridEvaluator::checkCandidates(
                     if (ruleKey != cand.wdRule) continue;
                 }
 
+                // 先截取网格编码适配层级，保证层级匹配
                 string sliceCode = cand.code;
-                if (cand.code.length() > (size_t)group.level) {
-                    sliceCode = cand.code.substr(0, group.level);
+                if (sliceCode.length() > (size_t)group.level) {
+                    sliceCode = sliceCode.substr(0, group.level);
                 }
 
+                // 【修复核心】：在适配后的安全层级上进行地面投影，实现绝对拦截
+                if (prefix == "dz" || prefix == "ad") {
+                    IJH ijh = getLocalTileRHC(sliceCode);
+                    ijh.layer = 0;
+                    sliceCode = rchToCode(ijh, static_cast<uint8_t>(sliceCode.length()));
+                }
 
                 // [关键修改] 生成 Redis 查询键时，拦截 hlz 前缀，重定向到 hl
                 // 当规则是 hlz (航路避让) 时，实际上需要查询 hl (航路) 数据

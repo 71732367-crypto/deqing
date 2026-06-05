@@ -133,6 +133,7 @@ const std::vector<Rule> &ruleSet() {
         {"wdh", "hash-fields", "<=", "tem", false, false, "温度小于标准值，禁止通行", nullptr},
         {"wdh", "hash-fields", ">=", "windSpeed", false, false, "风速大于标准值，禁止通行", nullptr},
         {"wdh", "hash-fields", ">", "rainPcpn", false, false, "降雨量大于标准值，禁止通行", nullptr},
+{"demgrid", "global-set", "", "", false, false, "当前网格不在120米真高适飞区内", nullptr},
     };
     return rules;
 }
@@ -438,10 +439,14 @@ struct AsyncContext {
                      if (targetRule != st.wdRule) continue;
                 }
 
-                // 根据层级截取网格编码前缀
                 std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
 
-
+                // 对于 dz 和 ad，强制映射到地面层(layer=0)，实现绝对垂直拦截
+                if (prefix == "dz" || prefix == "ad") {
+                    IJH ijh = getLocalTileRHC(slice);
+                    ijh.layer = 0;
+                    slice = rchToCode(ijh, static_cast<uint8_t>(slice.size()));
+                }
 
 
                 // [新增] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
@@ -637,9 +642,14 @@ struct AsyncContextFirst {
                      if (targetRule != st.wdRule) continue;
                 }
 
-                // 根据层级截取网格编码前缀
                 std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
 
+                // 对于 dz 和 ad，强制映射到地面层(layer=0)，实现绝对垂直拦截
+                if (prefix == "dz" || prefix == "ad") {
+                    IJH ijh = getLocalTileRHC(slice);
+                    ijh.layer = 0;
+                    slice = rchToCode(ijh, static_cast<uint8_t>(slice.size()));
+                }
 
                 // [关键修改] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
                 std::string queryPrefix = prefix;
@@ -872,9 +882,14 @@ void checkLineConflict(
                  if (targetRule != st.wdRule) continue;
             }
 
-            // 构造Redis键名
             std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
 
+            // 对于 dz 和 ad，强制映射到地面层(layer=0)，实现绝对垂直拦截
+            if (prefix == "dz" || prefix == "ad") {
+                IJH ijh = getLocalTileRHC(slice);
+                ijh.layer = 0;
+                slice = rchToCode(ijh, static_cast<uint8_t>(slice.size()));
+            }
 
 
             // [新增] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
@@ -1045,9 +1060,14 @@ void checkLineConflictFirst(
                  if (targetRule != st.wdRule) continue;
             }
 
-            // 构造Redis键名
             std::string slice = st.code.substr(0, std::min(static_cast<size_t>(level), st.code.size()));
 
+            // 对于 dz 和 ad，强制映射到地面层(layer=0)，实现绝对垂直拦截
+            if (prefix == "dz" || prefix == "ad") {
+                IJH ijh = getLocalTileRHC(slice);
+                ijh.layer = 0;
+                slice = rchToCode(ijh, static_cast<uint8_t>(slice.size()));
+            }
 
             // [新增] 键名重定向逻辑：如果前缀是 hlz，则查询 hl 的数据
             std::string queryPrefix = prefix;

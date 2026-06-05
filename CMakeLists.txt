@@ -69,6 +69,21 @@ add_executable(${PROJECT_NAME} main.cc
         GridEvaluatorLib/GridEvaluator.h
         controller/LineToGrids.cpp
         controller/LineToGrids.h
+        controller/api_multiSource_tifGrid.cc
+        controller/api_multiSource_tifGrid.h
+)
+# ##############################################################################
+# 链接库
+# ##############################################################################
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+        Drogon::Drogon
+        dqglib
+        TBB::tbb
+        ${PostgreSQL_LIBRARIES}
+        geos
+        geos_c
+
 )
 
 # ##############################################################################
@@ -112,7 +127,6 @@ target_include_directories(${PROJECT_NAME}
         dqglib/include
         ${PostgreSQL_INCLUDE_DIRS}
         ${GEOS_INCLUDE_DIRS})
-
 target_sources(${PROJECT_NAME}
         PRIVATE
         ${SRC_DIR}
