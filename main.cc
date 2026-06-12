@@ -7,6 +7,7 @@
 #include <iostream>
 #include <fstream>
 #include <clocale>
+#include "GridEvaluatorLib/GridEvaluator.h"
 #include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
@@ -101,7 +102,12 @@ int main() {
     std::cout << "使用配置文件: " << drogonConfigPath << std::endl;
     drogon::app().loadConfigFile(drogonConfigPath);
 
-    
+    std::string weightConfigPath = "./weight.json";
+    if (!api::airRoute::loadWeightConfig(weightConfigPath)) {
+        if (!api::airRoute::loadWeightConfig("../weight.json")) {
+            api::airRoute::loadWeightConfig("/app/weight.json");
+        }
+    }
     // 初始化 A* 算法配置（从 config.json 加载）
     api::airRoute::initializeAstarConfig();
     // ==========================================

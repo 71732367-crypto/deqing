@@ -1,84 +1,80 @@
 {
   "modes": {
-    "shortest": {                                            //最短
-      "distance": 0.5, "efficiency": 0.15,
-      "comm": 0.0338, "nav": 0.0263, "surv": 0.015,
-      "wind": 0.0203, "rain": 0.0081, "vis": 0.0054,
-      "temp": 0.0045, "hum": 0.0036, "press": 0.0032,
-      "em": 0.03, "riskArea": 0.1, "privacy": 0.1
+    "shortest": {
+      "distance": 1.0, "efficiency": 0.00,
+      "comm": 0.0, "nav": 0.0, "surv": 0.0,
+      "wind": 0.05, "rain": 0.0, "vis": 0.0,
+      "temp": 0.0, "hum": 0.0, "press": 0.0,
+      "em": 0.0, "riskArea": 0.1, "privacy": 0.0
     },
-    "safest": {                                             //最安全
-      "distance": 0.15, "efficiency": 0.1,
-      "comm": 0.0563, "nav": 0.0438, "surv": 0.025,
-      "wind": 0.0338, "rain": 0.0135, "vis": 0.009,
-      "temp": 0.0075, "hum": 0.006, "press": 0.0053,
-      "em": 0.05, "riskArea": 0.35, "privacy": 0.15
+    "safest": {
+      "distance": 1.0, "efficiency": 0.80,
+      "comm": 0.1, "nav": 0.1, "surv": 0.05,
+      "wind": 0.1, "rain": 0.1, "vis": 0.05,
+      "temp": 0.05, "hum": 0.5, "press": 0.5,
+      "em": 0.1, "riskArea": 0.4, "privacy": 0.15
     },
-    "balanced": {                                           //最均衡
-      "distance": 0.25, "efficiency": 0.15,
-      "comm": 0.045, "nav": 0.035, "surv": 0.02,
-      "wind": 0.027, "rain": 0.0108, "vis": 0.0072,
-      "temp": 0.006, "hum": 0.0048, "press": 0.0042,
-      "em": 0.04, "riskArea": 0.25, "privacy": 0.15
+    "balanced": {
+      "distance": 1.0, "efficiency": 0.1,
+      "comm": 0.05, "nav": 0.05, "surv": 0.0,
+      "wind": 0.1, "rain": 0.05, "vis": 0.0,
+      "temp": 0.0, "hum": 0.0, "press": 0.0,
+      "em": 0.05, "riskArea": 0.2, "privacy": 0.1
     }
   },
   "rules": {
-    "dc_14": {                                             //电磁数据
+    "dc_7": {
       "defaultValue": 1.0,
       "value": [
         {"range": "[-100,0]", "cost": 0, "description": "电磁环境良好，无干扰"},
-        {"range": "(0,5]", "cost": 0.2, "description": "轻度干扰，信号略有波动"},
-        {"range": "(5,20]", "cost": 0.5, "description": "中度干扰，通信可能受影响"},
-        {"range": "(20,100]", "cost": 0.8, "description": "重度干扰，通信可能中断"},
-        {"range": "(100,100000]", "cost": 1.0, "description": "严重干扰，无法正常飞行"}
+        {"range": "(0,5]", "cost": 0.2, "description": "轻度干扰"},
+        {"range": "(5,20]", "cost": 0.5, "description": "中度干扰"},
+        {"range": "(20,100]", "cost": 0.8, "description": "重度干扰"},
+        {"range": "(100,100000]", "cost": 1.0, "description": "严重干扰"}
       ]
     },
-    "tx_14": {                                            //通信数据
+    "tx_8": {
       "defaultValue": 0.2,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无通信" },
         { "match": "1", "cost": 0.0, "description": "有通信" }
       ]
     },
-    "dh_14": {                                                //导航数据
+    "dh_14": {
       "defaultValue": 0.2,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无导航" },
         { "match": "1", "cost": 0.0, "description": "有导航" }
       ]
     },
-    "jk_14": {                                          //监控数据
+    "jk_6": {
       "defaultValue": 0.3,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无监视" },
         { "match": "1", "cost": 0.0, "description": "有监视" }
       ]
     },
-    "fxq_11": {                                         //风险区数据
-      "defaultValue": 1.0,
-
-      "workday_low_risk_time": { "cost": 0.3, "description": "工作日低风险" },
-      "workday_mid_risk_time": { "cost": 0.6, "description": "工作日中风险" },
-      "workday_high_risk_time": { "cost": 1.0, "description": "工作日高风险" },
-      "weekend_low_risk_time": { "cost": 0.3, "description": "周末低风险" },
-      "weekend_mid_risk_time": { "cost": 0.6, "description": "周末中风险" },
-      "weekend_high_risk_time": { "cost": 1.0, "description": "周末高风险" },
-      "holiday_low_risk_time": { "cost": 0.3, "description": "节假日低风险" },
-      "holiday_mid_risk_time": { "cost": 0.6, "description": "节假日中风险" },
-      "holiday_high_risk_time": { "cost": 1.0, "description": "节假日高风险" }
-    }
-
+    "fxq_11": {
+      "workday_low_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.3, "description": "工作日低风险" }] },
+      "workday_mid_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.6, "description": "工作日中风险" }] },
+      "workday_high_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 1.0, "description": "工作日高风险" }] },
+      "weekend_low_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.3, "description": "周末低风险" }] },
+      "weekend_mid_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.6, "description": "周末中风险" }] },
+      "weekend_high_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 1.0, "description": "周末高风险" }] },
+      "holiday_low_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.3, "description": "节假日低风险" }] },
+      "holiday_mid_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.6, "description": "节假日中风险" }] },
+      "holiday_high_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 1.0, "description": "节假日高风险" }] }
     },
-    "privacy_14": {                                  //隐私数据
+    "privacy_14": {
       "residential_area": {
         "defaultValue": 0.0,
         "value": [
-          { "match": "0", "cost": 0.0, "description": "非居住区" },
-          { "match": "1", "cost": 0.5, "description": "居住区" }
+          { "range": "[0,0]", "cost": 0.0, "description": "非居住区" },
+          { "range": "(0,100]", "cost": 0.5, "description": "居住区" }
         ]
       }
     },
-    "wdh_14": {                                              //小时天气
+    "wdh_9": {
       "windSpeed": {
         "defaultValue": 1.0,
         "value": [
@@ -88,7 +84,7 @@
           {"range": "(13.8,1000]", "cost": 1, "description": "烈风"}
         ]
       },
-      "rainPcpn": {                                    //降雨数据
+      "rainPcpn": {
         "defaultValue": 1.0,
         "value": [
           { "range": "[0,0]", "cost": 0, "description": "无降水"},
@@ -97,7 +93,7 @@
           { "range": "(8,1000]", "cost": 1.0, "description": "大雨"}
         ]
       },
-      "visibility": {                                  //能见度
+      "visibility": {
         "defaultValue": 1.0,
         "value": [
           {"range": "[0,2000]", "cost": 1.0, "description": "极低能见度"},
@@ -107,7 +103,7 @@
           {"range": "(10000,100000]", "cost": 0, "description": "极佳能见度"}
         ]
       },
-      "tem": {                                       //气温
+      "tem": {
         "defaultValue": 1.0,
         "value": [
           {"range": "[-100,-10]", "cost": 1.0, "description": "极低温"},
@@ -117,7 +113,7 @@
           {"range": "(40,100]", "cost": 1.0, "description": "极高温"}
         ]
       },
-      "humidity": {                             //湿度
+      "humidity": {
         "defaultValue": 1.0,
         "value": [
           {"range": "[0,30]", "cost": 0.2, "description": "干燥"},
@@ -127,7 +123,7 @@
         ]
       }
     },
-    "wdd_14": {                                        //天气 天级
+    "wdd_14": {
       "pressure": {
         "defaultValue": 1.0,
         "value": [

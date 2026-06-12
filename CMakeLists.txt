@@ -71,6 +71,8 @@ add_executable(${PROJECT_NAME} main.cc
         controller/LineToGrids.h
         controller/api_multiSource_tifGrid.cc
         controller/api_multiSource_tifGrid.h
+        text/prefixToCode.cc
+        text/prefixToCode.h
 )
 # ##############################################################################
 # 链接库

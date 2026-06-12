@@ -426,11 +426,11 @@ Task<AStarResult> aStarPath(
 
     double hWeight = 1.3;
     if (routeMode == RouteMode::SAFEST) {
-        hWeight = 5.0;
+        hWeight = 1.5;
     } else if (routeMode == RouteMode::BALANCED) {
-        hWeight = 3.0;
+        hWeight = 1.5;
     } else if (routeMode == RouteMode::SHORTEST) {
-        hWeight = 2.0;
+        hWeight = 1.5;
     }
 
     auto heuristic = [&](int x, int y, int z) {
@@ -939,14 +939,21 @@ Task<AStarResult> aStarPath(
         }
 
         Json::Value ruleOptions;
-        if (jsonBody->isMember("options")) {
-            ruleOptions = (*jsonBody)["options"];
+
+        // 1. 默认提取 weight.json 的 rules 节点进行算路拦截和代价计算
+        if (g_weightConfig.isObject() && g_weightConfig.isMember("rules")) {
+            ruleOptions = g_weightConfig["rules"];
         } else {
-            ruleOptions = jsonBody->get("condition", Json::Value(Json::objectValue));
+            ruleOptions = Json::Value(Json::objectValue);
         }
 
+        // 2. （可选保留）如果前端非要传参覆盖，依然优先使用前端配置
+        if (jsonBody->isMember("condition") && !(*jsonBody)["condition"].empty()) {
+            ruleOptions = (*jsonBody)["condition"];
+        } else if (jsonBody->isMember("options") && !(*jsonBody)["options"].empty()) {
+            ruleOptions = (*jsonBody)["options"];
+        }
         bool isUnconstrained = ruleOptions.isNull() || (ruleOptions.isObject() && ruleOptions.empty());
-
         vector<string> fullPath;
         vector<int> pathIndexes;
         vector<string> waypointCodes;

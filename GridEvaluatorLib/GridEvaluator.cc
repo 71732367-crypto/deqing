@@ -4,13 +4,30 @@
 #include <unordered_set>
 #include <algorithm>
 #include<dqg/DQG3DBasic.h>
+#include<fstream>
 using namespace drogon;
 using namespace std;
 
 namespace api {
 namespace airRoute {
+    Json::Value g_weightConfig;
+    bool loadWeightConfig(const std::string& filepath) {
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            LOG_ERROR << "[GridEvaluator] Failed to open weight config file: " << filepath;
+            return false;
+        }
+        Json::CharReaderBuilder builder;
+        std::string errs;
+        if (!Json::parseFromStream(builder, file, &g_weightConfig, &errs)) {
+            LOG_ERROR << "[GridEvaluator] Failed to parse weight.json: " << errs;
+            return false;
+        }
+        LOG_INFO << "[GridEvaluator] Successfully loaded weight.json";
+        return true;
+    }
 
-// === 辅助工具函数 ===
+    // === 辅助工具函数 ===
 
 /**
  * @brief 将 Json::Value 转换为 double 类型数值
@@ -64,21 +81,31 @@ static double toNumber(const Json::Value& v) {
      */
     static double extractDynamicCost(const Json::Value& ruleConfig, double actualVal) {
     // 兼容检查：确保前端传的是新版的对象格式
-    if (!ruleConfig.isObject() || !ruleConfig.isMember("value")) {
-        return 0.0;
-    }
+        if (ruleConfig.isMember("cost")) {
+            double c = ruleConfig["cost"].asDouble();
+            // 【加一行日志】
+            LOG_INFO << "命中静态代价 -> 实际值: " << actualVal << " | 提取代价: " << c;
+            return c;
+        }
 
-    const auto& intervals = ruleConfig["value"];
-    if (intervals.isArray()) {
-        for (const auto& item : intervals) {
-            if (item.isMember("range") && item.isMember("cost")) {
-                std::string rangeStr = item["range"].asString();
-                if (isValueInRange(rangeStr, actualVal)) {
-                    return item["cost"].asDouble(); // 找到匹配区间，返回对应 cost
+        if (!ruleConfig.isMember("value")) {
+            return ruleConfig.get("defaultValue", 1.0).asDouble();
+        }
+
+        const auto& intervals = ruleConfig["value"];
+        if (intervals.isArray()) {
+            for (const auto& item : intervals) {
+                if (item.isMember("range") && item.isMember("cost")) {
+                    std::string rangeStr = item["range"].asString();
+                    if (isValueInRange(rangeStr, actualVal)) {
+                        double c = item["cost"].asDouble();
+                        // 【加一行日志】
+                        LOG_INFO << "命中区间代价 -> 区间: " << rangeStr << " | 实际值: " << actualVal << " | 提取代价: " << c;
+                        return c;
+                    }
                 }
             }
         }
-    }
 
     // 如果都不匹配，返回配置的 defaultValue，如果没配则默认满额代价 1.0
     return ruleConfig.get("defaultValue", 1.0).asDouble();

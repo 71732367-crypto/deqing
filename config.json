@@ -49,11 +49,11 @@
             //filename: Sqlite3 db file name
             //"filename":"",
             //host: Server address,localhost by default
-            "host": "localhost",
+            "host": "192.168.3.4",
             //port: Server port, 5432 by default
-            "port": 9990,
+            "port": 9874,
             //dbname: Database name
-            "dbname": "postgres",
+            "dbname": "grid_dev",
             //user: 'postgres' by default
             "user": "postgres",
             //passwd: '' by default
@@ -85,9 +85,9 @@
              //name: Name of the client,'default' by default
              "name": "default",
              //host: Server IP, 127.0.0.1 by default
-             "host": "localhost",
+             "host": "192.168.3.4",
              //port: Server port, 6379 by default
-             "port": 9990,
+             "port": 9874,
              //username: '' by default which means 'default' in redis ACL
              "username": "",
              //passwd: '' by default
