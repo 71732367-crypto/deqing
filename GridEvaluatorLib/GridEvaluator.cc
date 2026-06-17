@@ -124,8 +124,48 @@ static std::vector<std::string> split(const std::string &text, char sep) {
         if (!item.empty()) parts.push_back(item);
     }
     return parts;
-}
+    }
+    // 辅助函数：将 "HH:MM" 转换为当天的分钟数 (例如 "10:30" 转换为 630)
+    static int parseTimeStr(const std::string& timeStr) {
+        if (timeStr.length() < 5) return -1;
+        int h = 0, m = 0;
+        try {
+            h = std::stoi(timeStr.substr(0, 2));
+            m = std::stoi(timeStr.substr(3, 2));
+        } catch(...) { return -1; }
+        return h * 60 + m;
+    }
+    // 核心判断函数：校验无人机预计到达时间(arrivalTime)是否符合指定的 risk 时段和日期要求
+    static bool isTimeInRanges(int arrivalTime, const std::string& fieldName, const std::string& rangesStr) {
+        // 前端传入的是 Unix 时间戳（UTC 绝对秒数），转换为北京时间需要 + 8 小时 (8 * 3600 秒)
+        time_t t = arrivalTime + 8 * 3600;
+        struct tm tm_time;
+        // 使用线程安全的 gmtime_r 取出对应的小时和星期
+        gmtime_r(&t, &tm_time);
 
+        int currentMinutes = tm_time.tm_hour * 60 + tm_time.tm_min;
+        bool isWeekend = (tm_time.tm_wday == 0 || tm_time.tm_wday == 6);
+
+        // 校验日类型：根据规则字段名，过滤掉不符合当日类型的判定
+        if (fieldName.find("weekend") == 0 && !isWeekend) return false;
+        if (fieldName.find("workday") == 0 && isWeekend) return false;
+        if (fieldName.find("holiday") == 0 && !isWeekend) return false; // 简化处理：将周末视为节假日
+        // 校验具体时分段（支持如 "00:00-10:00,22:00-24:00" 的多个时段）
+        auto timeParts = split(rangesStr, ',');
+        for (const auto& part : timeParts) {
+            auto bounds = split(part, '-');
+            if (bounds.size() == 2) {
+                int startMin = parseTimeStr(bounds[0]);
+                int endMin = parseTimeStr(bounds[1]);
+                if (endMin == 0 && bounds[1].substr(0,2) == "24") endMin = 1440; // 兼容 24:00
+
+                if (currentMinutes >= startMin && currentMinutes <= endMin) {
+                    return true; // 匹配成功
+                }
+            }
+        }
+        return false;
+    }
 /**
  * @brief 静态规则定义结构体
  * 用于定义校验规则的元数据
@@ -495,10 +535,22 @@ struct AsyncContext {
                             }
 
                             // 2. 离散型代价提取（如：风险区、隐私区、电磁）
-                            if (passedRedLine && val.isString()) {
+                            if (passedRedLine && (val.isString() || val.isNumeric())) {
                                 std::string sVal = val.asString();
 
-                                if (prefix == "dc") curEm = extractDiscreteCost(group.rules[0].expectedValue, sVal);
+
+                                if (prefix == "tx") {
+                                    LOG_INFO << "[DEBUG TX] Found grid: " << redisKeyBase << ", raw value: " << sVal;
+                                }
+
+                                if (prefix == "dc") {
+                                    // 加上异常捕获，防止 redis 里存的不是纯数字导致程序崩溃
+                                    try {
+                                        curEm = extractDynamicCost(group.rules[0].expectedValue, std::stod(sVal));
+                                    } catch (...) {
+                                        curEm = 0; // 如果转换失败，默认给最高代价
+                                    }
+                                }
                                 else if (prefix == "tx") curComm = extractDiscreteCost(group.rules[0].expectedValue, sVal);
                                 else if (prefix == "dh") curNav = extractDiscreteCost(group.rules[0].expectedValue, sVal);
                                 else if (prefix == "jk") curSurv = extractDiscreteCost(group.rules[0].expectedValue, sVal);
@@ -541,11 +593,21 @@ struct AsyncContext {
                                             candPass = false; failReason = rule.description; break;
                                         }
 
-                                        // 2. 核心：提取数值并走动态规则引擎
-                                        double val = toNumber(hashVal[actualField]);
-                                        double dynamicCost = extractDynamicCost(rule.expectedValue, val);
+                                        double dynamicCost = 0.0;
+                                       if (prefix == "fxq") {
+                                           // 把 Redis 里的那串时间字符串安全地取出来（比如 "00:00-10:00..."）
+                                           std::string rangeStr = hashVal[actualField].isString() ? hashVal[actualField].asString() : "";
+                                           if (!rangeStr.empty() && isTimeInRanges(cand.arrivalTime, rule.jsonPath, rangeStr)) {
+                                               dynamicCost = extractDynamicCost(rule.expectedValue, 0.0);
+                                           }else {
+                                               continue;
+                                           }
+                                       }else {
+                                           // 2. 核心：提取数值并走动态规则引擎
+                                           double val = toNumber(hashVal[actualField]);
 
-                                        // 3. 根据前缀精准分发代价值
+                                           dynamicCost = extractDynamicCost(rule.expectedValue, val);
+                                       }
                                         // 3. 根据前缀精准分发代价值
                                         if (prefix == "wdh" || prefix == "wdd") {
                                             if (rule.jsonPath == "windSpeed") curWind = dynamicCost;
@@ -554,8 +616,7 @@ struct AsyncContext {
                                             else if (rule.jsonPath == "temperature" || rule.jsonPath == "tem" || rule.jsonPath == "tem1") curTemp = dynamicCost;
                                             else if (rule.jsonPath == "humidity") curHum = dynamicCost;
                                             else if (rule.jsonPath == "pressure") curPress = dynamicCost;
-                                        }
-                                        else if (prefix == "fxq") {
+                                        }else if (prefix == "fxq") {
                                             curRisk = dynamicCost;     // 风险区代价值
                                         }
                                         else if (prefix == "privacy") {

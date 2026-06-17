@@ -1007,7 +1007,7 @@ IJH localRowColHeiNumber(uint8_t level, double longitude, double latitude, doubl
         rchNumber.column = static_cast<uint32_t>(std::floor((longitude - baseTile.west - 360.0) / LOV));
     }
 
-    double HDV = 78125.0 / std::pow(2.0, level);
+    double HDV = baseTile.top / std::pow(2.0, level);
 
     // 【引入防线下溢】：计算相对于底部的物理高度
     double relativeHeight = height - baseTile.bottom;
@@ -1082,7 +1082,7 @@ string getLocalCode(uint8_t level, double longitude, double latitude, double hei
         // 计算经差
         double LOV = (baseTile.east - baseTile.west) / pow(2, level);
         // 计算高差
-    double HDV = 78125.0 / std::pow(2.0, level);
+    double HDV = baseTile.top / std::pow(2.0, level);
 
         latLonHeiObj.latitude = baseTile.north - (row + 0.5) * LDV;
         latLonHeiObj.longitude = (col + 0.5) * LOV + baseTile.west;
@@ -1408,7 +1408,7 @@ bool parseInteropLocalCode(const std::string& interopCode,
         }
 
         // 计算高差
-    double HDV = 78125.0 / std::pow(2.0, level);
+    double HDV = baseTile.top / std::pow(2.0, level);
     double relativeBottom = targetTile.bottom - baseTile.bottom;
     if (relativeBottom < 0.0) relativeBottom = 0.0;
     int H_start = static_cast<int>(std::floor(relativeBottom / HDV));
@@ -1480,7 +1480,7 @@ bool parseInteropLocalCode(const std::string& interopCode,
         // 计算纬度、经度、高度的差值
         double LDV = (baseTile.north - baseTile.south) / pow(2, level);
         double LOV = (baseTile.east - baseTile.west) / pow(2, level);
-    double HDV = 78125.0 / std::pow(2.0, level);
+    double HDV = baseTile.top / std::pow(2.0, level);
 
         // 计算中心点坐标
         latLonHeiObj.latitude = baseTile.north - (ijh.row + 0.5) * LDV;

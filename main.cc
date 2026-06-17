@@ -72,7 +72,7 @@ int main() {
     const int baseLevel = 2;  // 基础层级
     std::cout << "剖分层级对应的网格尺寸: " << std::endl;
     for (int level = 1; level < 32 - baseLevel; level++) {
-                double size = 78125.0 / std::pow(2.0, level);
+                double size = (projectBaseTile.top - projectBaseTile.bottom) / std::pow(2.0, level);
         std::cout << "  层级 " << level << " -> 尺寸 ≈ " << size << "m" << std::endl;
     }
 
