@@ -117,7 +117,11 @@ valgrind.*
 *.trace
 /.lingma/rules/language.md
 /.github/copilot-instructions.md
+# 忽略整个 dqglib 文件夹
+dqglib/
 
+# 强制取消忽略你需要的那个具体文件
+!dqglib/lib/dqglib.lib
 #test data
 data/
 

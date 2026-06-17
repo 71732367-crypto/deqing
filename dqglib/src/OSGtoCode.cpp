@@ -346,7 +346,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             // 【新增】提前计算当前层级的网格步长，避免在线程内重复计算
             const double LDV = (baseTile.north - baseTile.south) / std::pow(2.0, level);
             const double LOV = (baseTile.east - baseTile.west) / std::pow(2.0, level);
-            const double HDV = 78125.0 / std::pow(2.0, level);
+            const double HDV = baseTile.top / std::pow(2.0, level);
 
             const unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency() / 2);//获取cpu最大线程的1/2
             const size_t trianglesPerThread = (triangles.size() + numThreads - 1) / numThreads;

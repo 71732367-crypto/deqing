@@ -2,17 +2,17 @@
   "modes": {
     "shortest": {
       "distance": 1.0, "efficiency": 0.00,
-      "comm": 0.0, "nav": 0.0, "surv": 0.0,
+      "comm": 0.1, "nav": 0.1, "surv": 0.1,
       "wind": 0.05, "rain": 0.0, "vis": 0.0,
       "temp": 0.0, "hum": 0.0, "press": 0.0,
       "em": 0.0, "riskArea": 0.1, "privacy": 0.0
     },
     "safest": {
-      "distance": 1.0, "efficiency": 0.80,
-      "comm": 0.1, "nav": 0.1, "surv": 0.05,
+      "distance": 1.0, "efficiency": 0.60,
+      "comm": 0.3, "nav": 0.1, "surv": 0.05,
       "wind": 0.1, "rain": 0.1, "vis": 0.05,
       "temp": 0.05, "hum": 0.5, "press": 0.5,
-      "em": 0.1, "riskArea": 0.4, "privacy": 0.15
+      "em": 0.5, "riskArea": 1, "privacy": 0.15
     },
     "balanced": {
       "distance": 1.0, "efficiency": 0.1,
@@ -23,8 +23,8 @@
     }
   },
   "rules": {
-    "dc_7": {
-      "defaultValue": 1.0,
+    "dc": {//ok
+      "defaultValue": 0.0,
       "value": [
         {"range": "[-100,0]", "cost": 0, "description": "电磁环境良好，无干扰"},
         {"range": "(0,5]", "cost": 0.2, "description": "轻度干扰"},
@@ -33,39 +33,39 @@
         {"range": "(100,100000]", "cost": 1.0, "description": "严重干扰"}
       ]
     },
-    "tx_8": {
-      "defaultValue": 0.2,
+    "tx": {//ok
+      "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无通信" },
-        { "match": "1", "cost": 0.0, "description": "有通信" }
+        { "match": "1", "cost": 0, "description": "有通信" }
       ]
     },
-    "dh_14": {
-      "defaultValue": 0.2,
+    "dh": {//ok
+      "defaultValue": 0.0,
       "value": [
-        { "match": "0", "cost": 0.2, "description": "无导航" },
+        { "match": "0", "cost": 0.3, "description": "无导航" },
         { "match": "1", "cost": 0.0, "description": "有导航" }
       ]
     },
-    "jk_6": {
-      "defaultValue": 0.3,
+    "jk": {//ok
+      "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无监视" },
         { "match": "1", "cost": 0.0, "description": "有监视" }
       ]
     },
-    "fxq_11": {
-      "workday_low_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.3, "description": "工作日低风险" }] },
-      "workday_mid_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.6, "description": "工作日中风险" }] },
-      "workday_high_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 1.0, "description": "工作日高风险" }] },
-      "weekend_low_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.3, "description": "周末低风险" }] },
-      "weekend_mid_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.6, "description": "周末中风险" }] },
-      "weekend_high_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 1.0, "description": "周末高风险" }] },
-      "holiday_low_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.3, "description": "节假日低风险" }] },
-      "holiday_mid_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 0.6, "description": "节假日中风险" }] },
-      "holiday_high_risk_time": { "defaultValue": 1.0, "value": [{ "range": "[-1000, 1000]", "cost": 1.0, "description": "节假日高风险" }] }
+    "fxq": {//ok
+      "workday_low_risk_time": { "cost": 0.3, "description": "工作日低风险" },
+      "workday_mid_risk_time": { "cost": 0.6, "description": "工作日中风险" },
+      "workday_high_risk_time": { "cost": 1.0, "description": "工作日高风险" },
+      "weekend_low_risk_time": { "cost": 0.3, "description": "周末低风险" },
+      "weekend_mid_risk_time": { "cost": 0.6, "description": "周末中风险" },
+      "weekend_high_risk_time": { "cost": 1.0, "description": "周末高风险" },
+      "holiday_low_risk_time": { "cost": 0.3, "description": "节假日低风险" },
+      "holiday_mid_risk_time": { "cost": 0.6, "description": "节假日中风险" },
+      "holiday_high_risk_time": { "cost": 1.0, "description": "节假日高风险" }
     },
-    "privacy_14": {
+    "privacy": {//无
       "residential_area": {
         "defaultValue": 0.0,
         "value": [
@@ -74,9 +74,9 @@
         ]
       }
     },
-    "wdh_9": {
+    "wdh": {
       "windSpeed": {
-        "defaultValue": 1.0,
+        "defaultValue": 0.0,
         "value": [
           {"range":"[0,5]", "cost": 0, "description": "无风或轻风"},
           {"range": "(5,10]", "cost": 0.3, "description": "和风"},
@@ -85,7 +85,7 @@
         ]
       },
       "rainPcpn": {
-        "defaultValue": 1.0,
+        "defaultValue": 0.0,
         "value": [
           { "range": "[0,0]", "cost": 0, "description": "无降水"},
           { "range": "(0,0.1]", "cost": 0.3, "description": "小雨"},
@@ -94,7 +94,7 @@
         ]
       },
       "visibility": {
-        "defaultValue": 1.0,
+        "defaultValue": 0.0,
         "value": [
           {"range": "[0,2000]", "cost": 1.0, "description": "极低能见度"},
           {"range": "(2000,3000]", "cost": 0.8, "description": "低能见度"},
@@ -104,7 +104,7 @@
         ]
       },
       "tem": {
-        "defaultValue": 1.0,
+        "defaultValue": 0.0,
         "value": [
           {"range": "[-100,-10]", "cost": 1.0, "description": "极低温"},
           {"range": "(-10,0]", "cost": 0.6, "description": "低温"},
@@ -114,7 +114,7 @@
         ]
       },
       "humidity": {
-        "defaultValue": 1.0,
+        "defaultValue": 0.0,
         "value": [
           {"range": "[0,30]", "cost": 0.2, "description": "干燥"},
           {"range": "(30,60]", "cost": 0, "description": "舒适"},
@@ -123,9 +123,9 @@
         ]
       }
     },
-    "wdd_14": {
+    "wdd": {
       "pressure": {
-        "defaultValue": 1.0,
+        "defaultValue": 0.0,
         "value": [
           { "range": "(0,900]", "cost": 1.0, "description": "气压过低" },
           { "range": "(900,1050]", "cost": 0.0, "description": "正常气压" },

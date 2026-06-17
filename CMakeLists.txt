@@ -47,6 +47,7 @@ add_subdirectory(dqglib)
 
 find_package(SQLite3 REQUIRED)
 find_package(Drogon CONFIG REQUIRED)
+find_package(jsoncpp CONFIG REQUIRED)
 find_package(TBB REQUIRED)
 find_package(PostgreSQL REQUIRED)
 find_package(GEOS REQUIRED)
@@ -93,6 +94,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # ##############################################################################
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
+        JsonCpp::JsonCpp
         Drogon::Drogon
         dqglib
         TBB::tbb

@@ -476,7 +476,7 @@ std::vector<std::string> getPolygonGridCodes(
     // 计算当前层级的经纬差和高差
     double LDV = (baseTile.north - baseTile.south) / std::pow(2.0, level);
     double LOV = (baseTile.east - baseTile.west) / std::pow(2.0, level);
-    double HDV = 78125.0 / std::pow(2.0, level); // 保持与基础库一致
+    double HDV = baseTile.top / std::pow(2.0, level); // 保持与基础库一致
 
     // 1. 保留浮点精度转换为网格坐标
     std::vector<PointDouble> gridVerts;
@@ -621,7 +621,7 @@ std::vector<std::string> getPolygonSurfaceGridCodes(
 
     double LDV = (baseTile.north - baseTile.south) / std::pow(2.0, level);
     double LOV = (baseTile.east - baseTile.west) / std::pow(2.0, level);
-    double HDV = 78125.0 / std::pow(2.0, level);
+    double HDV = baseTile.top / std::pow(2.0, level);
 
     std::vector<PointDouble> gridVerts;
     gridVerts.reserve(coords.size());

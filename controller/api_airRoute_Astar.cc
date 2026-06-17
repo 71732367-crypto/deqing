@@ -1,4 +1,4 @@
-﻿#include "api_airRoute_Astar.h"
+#include "api_airRoute_Astar.h"
 #include "GridEvaluator.h"
 #include <drogon/drogon.h>
 #include <dqg/DQG3DBasic.h>
@@ -56,13 +56,21 @@ static double newton(double num, int iters = 5) {
 */
 
 // 根据层级获取网格大小（单位：米）
-double getGridSize(int level) {
-    if (level < 1 || level > 21) {
-        throw std::invalid_argument("Unsupported level: " + to_string(level));
-    }
-    return 78125.0 / std::pow(2.0, level);
-}
+    double getGridSize(int level) {
+    // 动态获取全局的基础瓦片配置
+    const BaseTile& baseTile = ::getProjectBaseTile();
 
+    // 使用您更新后的公式来计算网格物理大小
+    // （注意：需要确保 std::pow 的分母不为 0，当然 2.0^level 不会为 0）
+    double size = baseTile.top / std::pow(2.0, level);
+
+    // 如果对层级有合法性要求，可以保留校验（视您的业务逻辑而定）
+    if (level < 0 || level > 31) {
+        throw std::invalid_argument("Unsupported level: " + std::to_string(level));
+    }
+
+    return size;
+}
 // A*算法搜索方向定义，共26个方向（3D空间的26连通性）
 const vector<array<int, 3>> DIRECTIONS = {
     {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1},
@@ -172,7 +180,8 @@ AStarResult aStarPathSimple(
     array<int, 3> end,
     const AStarOptions& options,
     int level,
-    int workLayer
+    int workLayer,
+    bool enableTrueHeightCheck
 ) {
     double gridSize;
     try {
@@ -192,6 +201,7 @@ AStarResult aStarPathSimple(
     // [新增] 起点/终点 120米真高前置校验
     // ==========================================
     auto checkNodeTrueHeight = [&](int x, int y, int z, const string& pointName) -> string {
+        if (!enableTrueHeightCheck) return "";
         IJH ijh = {(uint32_t)y, (uint32_t)x, (uint32_t)z};
         string code = rchToCode(ijh, static_cast<uint8_t>(level));
         LatLonHei boundary = getLocalTileLatLon(code, baseTile);
@@ -306,16 +316,18 @@ AStarResult aStarPathSimple(
             string code = rchToCode(nextIJH, static_cast<uint8_t>(level));
             LatLonHei boundary = getLocalTileLatLon(code, baseTile);
 
-            float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
-            float trueHeight = boundary.height - groundElevation;
+            if (enableTrueHeightCheck) {
+                float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+                float trueHeight = boundary.height - groundElevation;
 
-            if (trueHeight > 120.0f) {
-                failReason = "超出空域限制，超出120米真高适飞空域";
-                continue;
-            }
-            if (trueHeight < 15.0f) {
-                failReason = "低于15米安全真高，存在撞地危险";
-                continue;
+                if (trueHeight > 120.0f) {
+                    failReason = "超出空域限制，超出120米真高适飞空域";
+                    continue;
+                }
+                if (trueHeight < 15.0f) {
+                    failReason = "低于15米安全真高，存在撞地危险";
+                    continue;
+                }
             }
             // ==========================================
 
@@ -349,7 +361,8 @@ Task<AStarResult> aStarPath(
     int level,
     std::shared_ptr<GridEvaluator> evaluator,
     int workLayer,
-    RouteMode routeMode
+    RouteMode routeMode,
+    bool enableTrueHeightCheck
 ) {
     int currentTime = getBeijingTime();
     // === [新增] 获取全局基础瓦片，用于后续的网格与经纬度转换 ===
@@ -380,6 +393,7 @@ Task<AStarResult> aStarPath(
     {
         // [新增] 独立真高校验，防止起终点直接违规
         auto checkNodeTrueHeight = [&](const string& code, const string& pointName) -> string {
+            if (!enableTrueHeightCheck) return "";
             LatLonHei boundary = getLocalTileLatLon(code, baseTile);
             float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
             float tHeight = boundary.height - ground;
@@ -542,24 +556,26 @@ Task<AStarResult> aStarPath(
             // 1. 将邻居网格编码转换为实际的经纬度和绝对高度
             LatLonHei boundary = getLocalTileLatLon(code, baseTile);
 
-            // 2. 从 TiffReader 获取此经纬度下的真实地面高程
-            float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+            if (enableTrueHeightCheck) {
+                // 2. 从 TiffReader 获取此经纬度下的真实地面高程
+                float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
 
-            // 3. 计算相对高差(真高)。
-            // 算法天然兼容负数高程（如水下测绘或低洼盆地），
-            // 假设无人机网格绝对高度 20m，地面海拔 -50m，真高为 20 - (-50) = 70m。
-            float trueHeight = boundary.height - groundElevation;
-            // 4. 适飞区判定限制：最高 120 米，最低安全距离 5 米
-            float maxFlyableTrueHeight = 120.0f;
-            float minSafeTrueHeight = 15.0f;
+                // 3. 计算相对高差(真高)。
+                // 算法天然兼容负数高程（如水下测绘或低洼盆地），
+                // 假设无人机网格绝对高度 20m，地面海拔 -50m，真高为 20 - (-50) = 70m。
+                float trueHeight = boundary.height - groundElevation;
+                // 4. 适飞区判定限制：最高 120 米，最低安全距离 5 米
+                float maxFlyableTrueHeight = 120.0f;
+                float minSafeTrueHeight = 15.0f;
 
-            if (trueHeight > maxFlyableTrueHeight) {
-                lastFailReason = "路径受阻: 前方超出空域限制，超出120米真高适飞空域";
-                continue;
-            }
-            if (trueHeight < minSafeTrueHeight) {
-                lastFailReason = "路径受阻: 前方低于15米安全真高，存在撞地危险";
-                continue;
+                if (trueHeight > maxFlyableTrueHeight) {
+                    lastFailReason = "路径受阻: 前方超出空域限制，超出120米真高适飞空域";
+                    continue;
+                }
+                if (trueHeight < minSafeTrueHeight) {
+                    lastFailReason = "路径受阻: 前方低于15米安全真高，存在撞地危险";
+                    continue;
+                }
             }
             // ==========================================
             validNeighbors.push_back({nx, ny, nz, code, moveDist, arrival});
@@ -651,7 +667,8 @@ Task<AStarResult> aStarPath(
         const vector<string>& originalPath, //存取抽稀前路径
         std::shared_ptr<GridEvaluator> evaluator, // 修复：统一变量名为 evaluator
         int startTime,
-        uint8_t level
+        uint8_t level,
+        bool enableTrueHeightCheck
     )
     {
         if (originalPath.size() <= 2) co_return originalPath;
@@ -712,13 +729,15 @@ Task<AStarResult> aStarPath(
             bool isLineSafe = true;
             for (const auto& code : expandedGridSet) {
                 // 【新增】真高安全校验：拉直的视线绝不能越过 120m 适飞区或 15m 撞地红线
-                LatLonHei boundary = getLocalTileLatLon(code, baseTile);
-                float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
-                float tHeight = boundary.height - ground;
+                if (enableTrueHeightCheck) {
+                    LatLonHei boundary = getLocalTileLatLon(code, baseTile);
+                    float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
+                    float tHeight = boundary.height - ground;
 
-                if (tHeight > 120.0f || tHeight < 15.0f) {
-                    isLineSafe = false;
-                    break;
+                    if (tHeight > 120.0f || tHeight < 15.0f) {
+                        isLineSafe = false;
+                        break;
+                    }
                 }
 
                 // 规则校验
@@ -830,6 +849,7 @@ Task<AStarResult> aStarPath(
         }
 
        double workHeight = (*jsonBody)["workHeight"].asDouble();
+       bool enableTrueHeightCheck = (*jsonBody).get("enableTrueHeightCheck", false).asBool();
 
         // ==========================================
         // [修改 1]：起飞垂直航线 (verticalPath)
@@ -938,20 +958,60 @@ Task<AStarResult> aStarPath(
             else if (reqMode == "original") currentMode = RouteMode::ORIGINAL;
         }
 
-        Json::Value ruleOptions;
+        Json::Value baseRules;
 
         // 1. 默认提取 weight.json 的 rules 节点进行算路拦截和代价计算
         if (g_weightConfig.isObject() && g_weightConfig.isMember("rules")) {
-            ruleOptions = g_weightConfig["rules"];
+            baseRules = g_weightConfig["rules"];
         } else {
-            ruleOptions = Json::Value(Json::objectValue);
+            baseRules = Json::Value(Json::objectValue);
         }
 
-        // 2. （可选保留）如果前端非要传参覆盖，依然优先使用前端配置
+        Json::Value ruleOptions(Json::objectValue);
+
+        // 2. 解析前端 condition 中指定的各影响因素网格层级（格式如: {"dc_7": {}}）
+        auto processFrontendCond = [&](const Json::Value& cond) {
+            Json::Value merged(Json::objectValue);
+            for (const auto& key : cond.getMemberNames()) {
+                std::string baseKey = key;
+                std::string levelStr = "";
+                
+                // 解析前端传的键名，例如从 "dc_7" 中提取出 "dc" 和 "7"
+                size_t underscore = key.find('_');
+                if (underscore != std::string::npos) {
+                    baseKey = key.substr(0, underscore);
+                    levelStr = key.substr(underscore + 1);
+                }
+
+                // 寻找 weight.json 中对应的基础配置
+                std::string configKey = baseKey;
+                if (!baseRules.isMember(baseKey)) {
+                    for (const auto& bk : baseRules.getMemberNames()) {
+                        if (bk.find(baseKey + "_") == 0) {
+                            configKey = bk;
+                            break;
+                        }
+                    }
+                }
+
+                // 如果找到配置，则将动态指定的层级拼接到键名上，供 GridEvaluator 解析
+                if (baseRules.isMember(configKey)) {
+                    if (!levelStr.empty()) {
+                        merged[baseKey + "_" + levelStr] = baseRules[configKey];
+                    } else {
+                        merged[key] = baseRules[configKey];
+                    }
+                } else {
+                    merged[key] = cond[key]; // 兜底
+                }
+            }
+            return merged;
+        };
+
         if (jsonBody->isMember("condition") && !(*jsonBody)["condition"].empty()) {
-            ruleOptions = (*jsonBody)["condition"];
+            ruleOptions = processFrontendCond((*jsonBody)["condition"]);
         } else if (jsonBody->isMember("options") && !(*jsonBody)["options"].empty()) {
-            ruleOptions = (*jsonBody)["options"];
+            ruleOptions = processFrontendCond((*jsonBody)["options"]);
         }
         bool isUnconstrained = ruleOptions.isNull() || (ruleOptions.isObject() && ruleOptions.empty());
         vector<string> fullPath;
@@ -972,12 +1032,12 @@ Task<AStarResult> aStarPath(
 
             if (isUnconstrained) {
                 LOG_INFO << "[A*] 航段 " << i+1 << " 使用无约束模式（简化版A*）";
-                segmentResult = aStarPathSimple(waypoints[i], waypoints[i + 1], options, level, workLayer);
+                segmentResult = aStarPathSimple(waypoints[i], waypoints[i + 1], options, level, workLayer, enableTrueHeightCheck);
             } else {
                 LOG_INFO << "[A*] 航段 " << i+1 << " 使用约束模式（协程版A*）";
                 segmentResult = co_await aStarPath(
                     waypoints[i], waypoints[i + 1], currentSegmentStartTime, planeRadius, options, level, gridEvaluator,
-                    workLayer, currentMode
+                    workLayer, currentMode, enableTrueHeightCheck
                 );
             }
 
@@ -989,7 +1049,7 @@ Task<AStarResult> aStarPath(
             // 调用平滑函数 (根据 applySmoothing 标志决定是否执行)
             if (applySmoothing && !isUnconstrained && !segmentResult.path.empty() && gridEvaluator) {
                 LOG_INFO << "[A*] 航段 " << i+1 << " 开始执行A*航线抽稀...";
-                segmentResult.path = co_await thinPathGreedy(segmentResult.path, gridEvaluator, currentSegmentStartTime, level);
+                segmentResult.path = co_await thinPathGreedy(segmentResult.path, gridEvaluator, currentSegmentStartTime, level, enableTrueHeightCheck);
             }
             if (!segmentResult.path.empty()) {
                 double stepGridSize = getGridSize(level);
