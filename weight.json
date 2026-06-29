@@ -1,5 +1,6 @@
 {
   "modes": {
+    //efficiency为上下探路的代价，distance为周围网格探路的代价
     "shortest": {
       "distance": 1.0, "efficiency": 0.00,
       "comm": 0.1, "nav": 0.1, "surv": 0.1,
@@ -10,20 +11,21 @@
     "safest": {
       "distance": 1.0, "efficiency": 0.60,
       "comm": 0.3, "nav": 0.1, "surv": 0.05,
-      "wind": 0.1, "rain": 0.1, "vis": 0.05,
-      "temp": 0.05, "hum": 0.5, "press": 0.5,
-      "em": 0.5, "riskArea": 1, "privacy": 0.15
+      "wind": 0.4, "rain": 0.4, "vis": 0.4,
+      "temp": 0.1, "hum": 0.4, "press": 0.2,
+      "em": 0.4, "riskArea": 1, "privacy": 0.15
     },
     "balanced": {
-      "distance": 1.0, "efficiency": 0.1,
-      "comm": 0.05, "nav": 0.05, "surv": 0.0,
-      "wind": 0.1, "rain": 0.05, "vis": 0.0,
-      "temp": 0.0, "hum": 0.0, "press": 0.0,
-      "em": 0.05, "riskArea": 0.2, "privacy": 0.1
+      "distance": 1.0, "efficiency": 0.40,
+      "comm": 0.2, "nav": 0.1, "surv": 0.05,
+      "wind": 0.2, "rain": 0.4, "vis": 0.3,
+      "temp": 0.1, "hum": 0.4, "press": 0.1,
+      "em": 0.2, "riskArea": 0.8, "privacy": 0.1
     }
   },
   "rules": {
-    "dc": {//ok
+    //defaultvalue为超出了你配置的所有区间或无匹配value。此时代码不知道该给多少惩罚，就会直接返回 defaultValue
+    "dc": {
       "defaultValue": 0.0,
       "value": [
         {"range": "[-100,0]", "cost": 0, "description": "电磁环境良好，无干扰"},
@@ -33,28 +35,28 @@
         {"range": "(100,100000]", "cost": 1.0, "description": "严重干扰"}
       ]
     },
-    "tx": {//ok
+    "tx": {
       "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无通信" },
         { "match": "1", "cost": 0, "description": "有通信" }
       ]
     },
-    "dh": {//ok
+    "dh": {
       "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.3, "description": "无导航" },
         { "match": "1", "cost": 0.0, "description": "有导航" }
       ]
     },
-    "jk": {//ok
+    "jk": {
       "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无监视" },
         { "match": "1", "cost": 0.0, "description": "有监视" }
       ]
     },
-    "fxq": {//ok
+    "fxq": {
       "workday_low_risk_time": { "cost": 0.3, "description": "工作日低风险" },
       "workday_mid_risk_time": { "cost": 0.6, "description": "工作日中风险" },
       "workday_high_risk_time": { "cost": 1.0, "description": "工作日高风险" },
@@ -65,7 +67,7 @@
       "holiday_mid_risk_time": { "cost": 0.6, "description": "节假日中风险" },
       "holiday_high_risk_time": { "cost": 1.0, "description": "节假日高风险" }
     },
-    "privacy": {//无
+    "privacy": {
       "residential_area": {
         "defaultValue": 0.0,
         "value": [

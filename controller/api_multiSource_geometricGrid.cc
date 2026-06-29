@@ -690,7 +690,7 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
         // 获取每个网格的详细信息 (并行优化)
         std::vector<LatLonHei> gridDetails;
         size_t count = gridCodes.size();
-
+       // 它会向操作系统查询当前硬件（CPU）支持多少个并发线程
         unsigned int numThreads = std::thread::hardware_concurrency();
         if (numThreads == 0) numThreads = 4;
 
