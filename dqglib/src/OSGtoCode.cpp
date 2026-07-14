@@ -1,3 +1,18 @@
+
+
+
+
+
+
+
+//已弃用，实际以api_multiSource_geometricGrid.cc为主
+
+
+
+
+
+
+
 #define _HAS_STD_BYTE 0
 #include <dqg/DQG3DTil.h>
 #include <dqg/Extractor.h>

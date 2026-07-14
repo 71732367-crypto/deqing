@@ -1,6 +1,6 @@
 {
   "modes": {
-    //efficiency为上下探路的代价，distance为周围网格探路的代价
+    //efficiency为上下探路的代价，distance为走周围网格探路的代价
     "shortest": {
       "distance": 1.0, "efficiency": 0.00,
       "comm": 0.1, "nav": 0.1, "surv": 0.1,
@@ -24,7 +24,7 @@
     }
   },
   "rules": {
-    //defaultvalue为超出了你配置的所有区间或无匹配value。此时代码不知道该给多少惩罚，就会直接返回 defaultValue
+    //defaultvalue为超出了你配置的所有区间或无匹配value。此时代码不知道该给多少惩罚，就会直接返回defaultValue
     "dc": {
       "defaultValue": 0.0,
       "value": [

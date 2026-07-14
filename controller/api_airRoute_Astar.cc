@@ -440,11 +440,11 @@ Task<AStarResult> aStarPath(
 
     double hWeight = 1.3;
     if (routeMode == RouteMode::SAFEST) {
-        hWeight = 1.5;
+        hWeight = 1.3;
     } else if (routeMode == RouteMode::BALANCED) {
-        hWeight = 1.5;
+        hWeight = 1.3;
     } else if (routeMode == RouteMode::SHORTEST) {
-        hWeight = 1.5;
+        hWeight = 1.3;
     }
 
     auto heuristic = [&](int x, int y, int z) {

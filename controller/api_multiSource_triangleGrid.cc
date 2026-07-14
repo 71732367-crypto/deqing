@@ -299,7 +299,6 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
 
         // 获取全局基础瓦片配置
         const BaseTile& baseTile = ::getProjectBaseTile();
-
         // 定义元数据查找函数
         const auto findMetadataDir = [](std::filesystem::path current) -> std::filesystem::path {
             current = std::filesystem::absolute(current);

@@ -665,7 +665,7 @@ void basicGrid::getLocalToGlobal(const HttpRequestPtr& req, std::function<void (
         if (localCode.empty()) {
             Json::Value response;
             response["status"] = "error";
-            response["message"] = "localCode 涓嶈兘涓虹┖";
+            response["message"] = "localCode 不能为空";
             auto resp = HttpResponse::newHttpJsonResponse(response);
             resp->setStatusCode(k400BadRequest);
             callback(resp);

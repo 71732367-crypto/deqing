@@ -272,12 +272,12 @@ std::string readSourceCRSFromXML(const std::string& dataDir) {
             }
         }
     }
-    
+
     if (sourceCRS.empty()) {
         std::cerr << "[警告] 无法从metadata.xml解析源坐标系，使用默认值" << std::endl;
         return "EPSG:4528";  // 默认值
     }
-    
+
     std::cout << "[信息] 从metadata.xml读取源坐标系: " << sourceCRS << std::endl;
     return sourceCRS;
 }
@@ -359,19 +359,19 @@ void convertCoordinates(vector<Triangle>& triangles,
         actualSourceCRS = "EPSG:4528";  // 默认值
         std::cout << "[信息] 使用默认源坐标系: " << actualSourceCRS << std::endl;
     }
-    
+
     // 确保目标坐标系为WGS84
     string actualTargetCRS = targetCRS;
     if (actualTargetCRS != "EPSG:4326") {
         std::cout << "[信息] 目标坐标系已设置为WGS84 (EPSG:4326)" << std::endl;
         actualTargetCRS = "EPSG:4326";
     }
-    
+
     // 检查是否使用了默认偏移量(0,0,0)，如果是，提示可能需要从XML读取
     if (offsetX == 0.0 && offsetY == 0.0 && offsetZ == 0.0) {
         std::cout << "[提示] 使用默认偏移量(0,0,0)，如果需要从XML读取偏移量，请使用带数据目录参数的版本" << std::endl;
     }
-    
+
     // // 设置PROJ库路径（由CMake在编译时确定）
     // #ifdef PROJ_DATA_PATH
     //     // 如果编译时确定了 PROJ 数据路径，且当前环境未设置 PROJ_LIB，则设置它
@@ -452,7 +452,7 @@ void convertCoordinates(vector<Triangle>& triangles,
     // 清理资源
     proj_destroy(transform);
     proj_context_destroy(context);
-    
+
     std::cout << "[信息] 坐标转换完成: " << actualSourceCRS << " -> " << actualTargetCRS << std::endl;
 }
 
@@ -491,7 +491,7 @@ void convertCoordinatesFromXML(vector<Triangle>& triangles,
 // offsetX, offsetY, offsetZ：坐标偏移量，用于调整转换后的坐标
 // 返回值：转换后的OSG Vec3d 数组
 std::vector<osg::Vec3d> convertOSG_Coordinates(const std::vector<Vertex>& vertices,
-    double offsetX, double offsetY, double offsetZ) 
+    double offsetX, double offsetY, double offsetZ)
 {
     PJ_CONTEXT* C = proj_context_create();
     PJ* P = proj_create_crs_to_crs(C, "EPSG:4326", "EPSG:2326", nullptr);

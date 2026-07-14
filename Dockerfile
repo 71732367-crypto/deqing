@@ -15,8 +15,8 @@ ENV MAKEFLAGS=-j$(nproc)
 
 # 🚀 替换为清华大学 (TUNA) 镜像源
 RUN sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/ubuntu.sources
-
+    sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/ubuntu.sources && \
+    sed -i 's/Components: main restricted/Components: main restricted universe/g' /etc/apt/sources.list.d/ubuntu.sources
 # 更新包管理器并安装构建依赖 (增加 --fix-missing 容错)
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --fix-missing \
@@ -143,6 +143,7 @@ RUN apt-get update && \
     libgdal-dev \
     gdal-bin \
     libproj-dev \
+    libjemalloc2 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -214,10 +215,11 @@ RUN echo '#!/bin/bash' > /app/start.sh && \
     echo '    echo "❌  错误：数据目录不可写"' >> /app/start.sh && \
     echo '    exit 1' >> /app/start.sh && \
     echo 'fi' >> /app/start.sh && \
-    echo 'if [ -z "$LD_LIBRARY_PATH" ]; then' >> /app/start.sh && \
-    echo '    export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/x86_64-linux-gnu' >> /app/start.sh && \
-    echo 'fi' >> /app/start.sh && \
-    echo 'echo "✅  Deqing Serve 正在启动..."' >> /app/start.sh && \
+     echo 'if [ -z "$LD_LIBRARY_PATH" ]; then' >> /app/start.sh && \
+        echo '    export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/x86_64-linux-gnu' >> /app/start.sh && \
+        echo 'fi' >> /app/start.sh && \
+        echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2' >> /app/start.sh && \
+        echo 'echo "✅  Deqing Serve 正在启动..."' >> /app/start.sh && \
     echo 'cd /app' >> /app/start.sh && \
     echo 'exec /usr/local/bin/deqing_serve' >> /app/start.sh && \
     chown appuser:appuser /app/start.sh && \
