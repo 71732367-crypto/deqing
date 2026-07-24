@@ -100,9 +100,8 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
             // 继续尝试插入，可能表已经存在但检查失败
         }
         
-        // 插入日志记录
-        std::string sql = "INSERT INTO update_log (module_code, module_name, update_content) "
-                         "VALUES ($1, $2, $3)";
+        std::string sql = "INSERT INTO update_log (module_code, module_name, update_content, create_time, update_time) "
+                         "VALUES ($1, $2, $3, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')";
         dbClient->execSqlSync(sql, moduleCode, moduleName, updateContent);
         LOG_INFO << "成功插入更新日志: " << moduleName << " - " << updateContent;
         return true;
@@ -296,6 +295,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         // ==================== 全局统计变量 ====================
         std::atomic<uint64_t> totalTrianglesProcessed{0};
         std::atomic<uint64_t> totalGridCount{0};
+        std::atomic<uint64_t> totalDiscardedTriangles{0};
 
         // 获取全局基础瓦片配置
         const BaseTile& baseTile = ::getProjectBaseTile();
@@ -360,15 +360,14 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             } catch (const std::exception& e) {
                 LOG_WARN << "坐标转换失败: " << e.what();
             }
-
-            // 处理三角形到网格的转换
+        // 处理三角形到网格的转换
             std::unordered_set<std::string> chunkCodes;
             const uint8_t gridLevelUint = static_cast<uint8_t>(level);
             const unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency() / 2); // 限制线程数以控制内存使用
             const size_t trianglesPerThread = (triangles.size() + numThreads - 1) / numThreads;
 
             // 并行处理三角形到网格的转换
-            std::vector<std::future<std::unordered_set<std::string>>> futures;
+            std::vector<std::future<std::pair<std::unordered_set<std::string>, uint64_t>>> futures;
             for (unsigned int i = 0; i < numThreads; ++i) {
                 size_t startIdx = i * trianglesPerThread;
                 size_t endIdx = std::min(startIdx + trianglesPerThread, triangles.size());
@@ -376,11 +375,26 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
 
                 futures.push_back(std::async(std::launch::async, [&, startIdx, endIdx]() {
                     std::unordered_set<std::string> localCodes;
+                    uint64_t localDiscarded = 0;
                     for (size_t idx = startIdx; idx < endIdx; ++idx) {
                         const auto &t = triangles[idx];
                         if (std::isnan(t.vertex1.Lng) || std::isnan(t.vertex1.Lat) || std::isnan(t.vertex1.Hgt) ||
                             std::isnan(t.vertex2.Lng) || std::isnan(t.vertex2.Lat) || std::isnan(t.vertex2.Hgt) ||
                             std::isnan(t.vertex3.Lng) || std::isnan(t.vertex3.Lat) || std::isnan(t.vertex3.Hgt)) continue;
+                        
+                        // 过滤边界外的三角形，防止转换局部坐标时发生无符号整型下溢。
+                        // 这里只检查 2D 经纬度边界，不检查高度 (Hgt)，因为 region.json 往往没有配置高度，默认 top 会极小导致误杀。
+                        auto isOutside = [&](const PointLBHd& p) {
+                            return p.Lng < baseTile.west || p.Lng > baseTile.east ||
+                                   p.Lat < baseTile.south || p.Lat > baseTile.north;
+                        };
+                        
+                        // 只要有任何一个顶点在基准瓦片边界外，就过滤掉（避免映射到uint32_t时下溢为极大值）
+                        if (isOutside(t.vertex1) || isOutside(t.vertex2) || isOutside(t.vertex3)) {
+                            localDiscarded++;
+                            continue;
+                        }
+                        
                         try {
                             IJH p1 = localRowColHeiNumber(gridLevelUint, t.vertex1.Lng, t.vertex1.Lat, t.vertex1.Hgt, baseTile);
                             IJH p2 = localRowColHeiNumber(gridLevelUint, t.vertex2.Lng, t.vertex2.Lat, t.vertex2.Hgt, baseTile);
@@ -392,14 +406,16 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                             }
                         } catch (...) {}
                     }
-                    return localCodes;
+                    return std::make_pair(localCodes, localDiscarded);
                 }));
             }
 
             // 收集并合并所有线程的结果
             for (auto& f : futures) {
-                auto localCodes = f.get();
+                auto result = f.get();
+                auto localCodes = result.first;
                 chunkCodes.insert(localCodes.begin(), localCodes.end());
+                totalDiscardedTriangles.fetch_add(result.second);
             }
 
             // 清理三角形数据以释放内存
@@ -492,6 +508,8 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         res["status"] = "success";
         res["data"]["total_triangles_processed"] = static_cast<Json::UInt64>(totalTrianglesProcessed.load());
         res["data"]["total_grid_count"] = static_cast<Json::UInt64>(totalGridCount.load());
+        res["data"]["total_discarded_triangles"] = static_cast<Json::UInt64>(totalDiscardedTriangles.load());
+        res["data"]["discard_reason"] = "total_discarded_triangles为部分三角形顶点坐标超出了region.json边界或数据异常而被丢弃的数量。";
         res["data"]["message"] = "处理完成，数据已存入数据库";
         // 移除 cells 字段，避免内存溢出
 

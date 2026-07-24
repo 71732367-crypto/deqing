@@ -27,6 +27,7 @@ class basicGrid : public drogon::HttpController<basicGrid>
     ADD_METHOD_TO(basicGrid::getCodeByLB, "/api/multiSource/basicGrid/getCodeByLB", Post); // 根据经纬度和层级获取网格编码接口
     ADD_METHOD_TO(basicGrid::getLocalToGlobal, "/api/multiSource/basicGrid/getLocalToGlobal", Post); // 局部网格编码转换为全球网格编码接口
     ADD_METHOD_TO(basicGrid::getGridCodeByPoint, "/api/multiSource/basicGrid/getGridCodeByPoint", Post); // 点网格化详细信息接口
+    ADD_METHOD_TO(basicGrid::getGridScaleInfo, "/api/multiSource/basicGrid/getGridScaleInfo", Get); // 获取网格尺度信息接口
   
     METHOD_LIST_END
     // your declaration of processing function maybe like this:
@@ -52,6 +53,8 @@ class basicGrid : public drogon::HttpController<basicGrid>
     void getLocalToGlobal(const HttpRequestPtr& req, std::function<void (const HttpResponsePtr &)> &&callback) const;
     /// 接口函数：根据给定的经纬度、高度和层级获取网格编码。
     void getGridCodeByPoint(const HttpRequestPtr& req, std::function<void (const HttpResponsePtr &)> &&callback) const;
+    /// 接口函数：获取网格尺度信息接口。
+    void getGridScaleInfo(const HttpRequestPtr& req, std::function<void (const HttpResponsePtr &)> &&callback) const;
 
 
 };

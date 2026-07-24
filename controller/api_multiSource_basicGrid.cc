@@ -4,7 +4,6 @@
 #include <dqg/DQG3DBasic.h>
 #include <dqg/GlobalBaseTile.h>
 #include <dqg/DQG2D.h>
-
 using namespace api::multiSource;
 
 namespace {
@@ -827,6 +826,40 @@ void basicGrid::getGridCodeByPoint(const HttpRequestPtr& req, std::function<void
 
     } catch (const std::exception& e) {
         // 捕获异常并构造错误响应
+        Json::Value response;
+        response["status"] = "error";
+        response["message"] = std::string("服务器内部错误: ") + e.what();
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        resp->setStatusCode(k500InternalServerError);
+        callback(resp);
+    }
+}
+
+/// 接口函数：获取网格尺度信息接口
+void basicGrid::getGridScaleInfo(const HttpRequestPtr& req, std::function<void (const HttpResponsePtr &)> &&callback) const
+{
+    try {
+        const BaseTile& baseTile = ::getProjectBaseTile();
+        const int baseLevel = 2; // 基础层级
+        
+        Json::Value response;
+        response["status"] = "success";
+        Json::Value dataArray(Json::arrayValue);
+        
+        for (int level = 1; level < 32 - baseLevel; level++) {
+            double size = (baseTile.top - baseTile.bottom) / std::pow(2.0, level);
+            Json::Value item;
+            item["level"]=level;
+            item["size"] = size;
+            dataArray.append(item);
+        }
+        
+        response["data"] = dataArray;
+        
+        auto resp = HttpResponse::newHttpJsonResponse(response);
+        resp->setStatusCode(k200OK);
+        callback(resp);
+    } catch (const std::exception& e) {
         Json::Value response;
         response["status"] = "error";
         response["message"] = std::string("服务器内部错误: ") + e.what();
