@@ -438,13 +438,13 @@ Task<AStarResult> aStarPath(
     // [核心修改 1]：动态启发式权重 (Weighted A*)
     // 默认 1.3 用于打破平衡；如果是 safest 模式，大幅提高权重以抵消巨大的 g(n) 惩罚
 
-    double hWeight = 1.3;
+    double hWeight = 20;
     if (routeMode == RouteMode::SAFEST) {
-        hWeight = 1.3;
+        hWeight = 20;
     } else if (routeMode == RouteMode::BALANCED) {
-        hWeight = 1.3;
+        hWeight = 20;
     } else if (routeMode == RouteMode::SHORTEST) {
-        hWeight = 1.3;
+        hWeight = 20;
     }
 
     auto heuristic = [&](int x, int y, int z) {
@@ -975,7 +975,6 @@ Task<AStarResult> aStarPath(
             for (const auto& key : cond.getMemberNames()) {
                 std::string baseKey = key;
                 std::string levelStr = "";
-                
                 // 解析前端传的键名，例如从 "dc_7" 中提取出 "dc" 和 "7"
                 size_t underscore = key.find('_');
                 if (underscore != std::string::npos) {
