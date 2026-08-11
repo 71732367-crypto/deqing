@@ -438,13 +438,13 @@ Task<AStarResult> aStarPath(
     // [核心修改 1]：动态启发式权重 (Weighted A*)
     // 默认 1.3 用于打破平衡；如果是 safest 模式，大幅提高权重以抵消巨大的 g(n) 惩罚
 
-    double hWeight = 20;
+    double hWeight = 1.2;
     if (routeMode == RouteMode::SAFEST) {
-        hWeight = 20;
+        hWeight = 1.2;
     } else if (routeMode == RouteMode::BALANCED) {
-        hWeight = 20;
+        hWeight = 1.2;
     } else if (routeMode == RouteMode::SHORTEST) {
-        hWeight = 20;
+        hWeight = 1.2;
     }
 
     auto heuristic = [&](int x, int y, int z) {
