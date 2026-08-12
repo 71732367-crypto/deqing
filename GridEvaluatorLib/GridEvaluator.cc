@@ -527,6 +527,77 @@ struct AsyncContext {
                             // 1. 红线校验
                             bool passedRedLine = true;
                             for (const auto& rule : group.rules) {
+                                //======电子围栏时间校验=======
+                                                              // === 新增：临时空域(电子围栏)时间校验 (兼容数组和单个对象，无Lambda版) ===
+                                if (rule.prefix == "dz" && cand.checkTimeRules) {
+                                    bool timeConflict = false;
+
+                                    if (val.isArray()) {
+                                        // 遍历数组
+                                        for (unsigned int i = 0; i < val.size(); ++i) {
+                                            const Json::Value& timeRange = val[i];
+                                            if (timeRange.isObject() && timeRange.isMember("start_time") && timeRange.isMember("end_time")) {
+                                                std::string stStr = timeRange["start_time"].asString();
+                                                std::string etStr = timeRange["end_time"].asString();
+
+                                                struct tm tm_st = {0};
+                                                struct tm tm_et = {0};
+                                                int y, M, d, h, m, s;
+
+                                                if (sscanf(stStr.c_str(), "%d-%d-%d %d:%d:%d", &y, &M, &d, &h, &m, &s) == 6) {
+                                                    tm_st.tm_year = y - 1900; tm_st.tm_mon = M - 1; tm_st.tm_mday = d;
+                                                    tm_st.tm_hour = h; tm_st.tm_min = m; tm_st.tm_sec = s;
+                                                }
+                                                if (sscanf(etStr.c_str(), "%d-%d-%d %d:%d:%d", &y, &M, &d, &h, &m, &s) == 6) {
+                                                    tm_et.tm_year = y - 1900; tm_et.tm_mon = M - 1; tm_et.tm_mday = d;
+                                                    tm_et.tm_hour = h; tm_et.tm_min = m; tm_et.tm_sec = s;
+                                                }
+
+                                                int st = static_cast<int>(timegm(&tm_st));
+                                                int et = static_cast<int>(timegm(&tm_et));
+
+                                                if (cand.arrivalTime >= st && cand.arrivalTime <= et) {
+                                                    timeConflict = true;
+                                                    break; // 只要有一个时间段冲突，就拦截
+                                                }
+                                            }
+                                        }
+                                    }
+                                    else if (val.isObject()) {
+                                        // 单个对象直接校验
+                                        if (val.isMember("start_time") && val.isMember("end_time")) {
+                                            std::string stStr = val["start_time"].asString();
+                                            std::string etStr = val["end_time"].asString();
+
+                                            struct tm tm_st = {0};
+                                            struct tm tm_et = {0};
+                                            int y, M, d, h, m, s;
+
+                                            if (sscanf(stStr.c_str(), "%d-%d-%d %d:%d:%d", &y, &M, &d, &h, &m, &s) == 6) {
+                                                tm_st.tm_year = y - 1900; tm_st.tm_mon = M - 1; tm_st.tm_mday = d;
+                                                tm_st.tm_hour = h; tm_st.tm_min = m; tm_st.tm_sec = s;
+                                            }
+                                            if (sscanf(etStr.c_str(), "%d-%d-%d %d:%d:%d", &y, &M, &d, &h, &m, &s) == 6) {
+                                                tm_et.tm_year = y - 1900; tm_et.tm_mon = M - 1; tm_et.tm_mday = d;
+                                                tm_et.tm_hour = h; tm_et.tm_min = m; tm_et.tm_sec = s;
+                                            }
+
+                                            int st = static_cast<int>(timegm(&tm_st));
+                                            int et = static_cast<int>(timegm(&tm_et));
+
+                                            if (cand.arrivalTime >= st && cand.arrivalTime <= et) {
+                                                timeConflict = true;
+                                            }
+                                        }
+                                    }
+
+                                    // 算路到达该网格的时间不在禁飞时间段内，或者是无法解析的脏数据，则放行
+                                    if (!timeConflict && (val.isArray() || val.isObject())) {
+                                        continue;
+                                    }
+                                }
+                                // ========================================
+
                                 if (!evaluator->evaluateConstraint(rule, val)) {
                                     candPass = false; failReason = rule.description;
                                     passedRedLine = false;
