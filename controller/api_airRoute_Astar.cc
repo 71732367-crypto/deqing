@@ -994,14 +994,16 @@ Task<AStarResult> aStarPath(
                 }
 
                 // 如果找到配置，则将动态指定的层级拼接到键名上，供 GridEvaluator 解析
-                if (baseRules.isMember(configKey)) {
+                if (baseRules.isMember(configKey) && cond[key].empty()) {
+                    // 前端传的是空对象（如 "dc_14": {}），采用后端 weight.json 默认配置
                     if (!levelStr.empty()) {
                         merged[baseKey + "_" + levelStr] = baseRules[configKey];
                     } else {
                         merged[key] = baseRules[configKey];
                     }
                 } else {
-                    merged[key] = cond[key]; // 兜底
+                    // 前端传了具体内容（或者是一个全新未知的key），直接使用前端传的内容
+                    merged[key] = cond[key];
                 }
             }
             return merged;
