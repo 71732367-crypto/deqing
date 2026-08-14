@@ -114,12 +114,12 @@ static double toNumber(const Json::Value& v) {
         if (ruleConfig.isMember("cost")) {
             double c = ruleConfig["cost"].asDouble();
             // 【加一行日志】
-            LOG_INFO << "命中静态代价 -> 实际值: " << actualVal << " | 提取代价: " << c;
+  //          LOG_INFO << "命中静态代价 -> 实际值: " << actualVal << " | 提取代价: " << c;
             return c;
         }
 
         if (!ruleConfig.isMember("value")) {
-            return ruleConfig.get("defaultValue", 1.0).asDouble();
+            return 0.0;
         }
 
         const auto& intervals = ruleConfig["value"];
@@ -130,15 +130,15 @@ static double toNumber(const Json::Value& v) {
                     if (isValueInRange(rangeStr, actualVal)) {
                         double c = item["cost"].asDouble();
                         // 【加一行日志】
-                        LOG_INFO << "命中区间代价 -> 区间: " << rangeStr << " | 实际值: " << actualVal << " | 提取代价: " << c;
+        //                LOG_INFO << "命中区间代价 -> 区间: " << rangeStr << " | 实际值: " << actualVal << " | 提取代价: " << c;
                         return c;
                     }
                 }
             }
         }
 
-    // 如果都不匹配，返回配置的 defaultValue，如果没配则默认满额代价 1.0
-    return ruleConfig.get("defaultValue", 1.0).asDouble();
+    // 如果都不匹配，返回 0 (无额外代价，阈值机制已接管不可通行判断)
+    return 0.0;
 }
 /**
  * @brief 按指定分隔符分割字符串
@@ -476,7 +476,7 @@ struct AsyncContext {
                 }
             }
         }
-        return ruleConfig.get("defaultValue", 1.0).asDouble();
+        return 0.0;
     }
 /**
      * @brief 完成所有 Redis 查询后的处理逻辑

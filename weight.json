@@ -24,9 +24,7 @@
     }
   },
   "rules": {
-    //defaultvalue为超出了你配置的所有区间或无匹配value。此时代码不知道该给多少惩罚，就会直接返回defaultValue
     "dc": {
-      "defaultValue": 0.0,
       "value": [
         {"range": "[-100,0]", "cost": 0, "description": "电磁环境良好，无干扰"},
         {"range": "(0,5]", "cost": 0.2, "description": "轻度干扰"},
@@ -36,21 +34,18 @@
       ]
     },
     "tx": {
-      "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无通信" },
         { "match": "1", "cost": 0, "description": "有通信" }
       ]
     },
     "dh": {
-      "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.3, "description": "无导航" },
         { "match": "1", "cost": 0.0, "description": "有导航" }
       ]
     },
     "jk": {
-      "defaultValue": 0.0,
       "value": [
         { "match": "0", "cost": 0.2, "description": "无监视" },
         { "match": "1", "cost": 0.0, "description": "有监视" }
@@ -69,7 +64,6 @@
     },
     "privacy": {
       "residential_area": {
-        "defaultValue": 0.0,
         "value": [
           { "range": "[0,0]", "cost": 0.0, "description": "非居住区" },
           { "range": "(0,100]", "cost": 0.5, "description": "居住区" }
@@ -78,7 +72,6 @@
     },
     "wdh": {
       "windSpeed": {
-        "defaultValue": 0.0,
         "value": [
           {"range":"[0,5]", "cost": 0, "description": "无风或轻风"},
           {"range": "(5,10]", "cost": 0.3, "description": "和风"},
@@ -87,7 +80,6 @@
         ]
       },
       "rainPcpn": {
-        "defaultValue": 0.0,
         "value": [
           { "range": "[0,0]", "cost": 0, "description": "无降水"},
           { "range": "(0,0.1]", "cost": 0.3, "description": "小雨"},
@@ -96,7 +88,6 @@
         ]
       },
       "visibility": {
-        "defaultValue": 0.0,
         "value": [
           {"range": "[0,2000]", "cost": 1.0, "description": "极低能见度"},
           {"range": "(2000,3000]", "cost": 0.8, "description": "低能见度"},
@@ -106,7 +97,6 @@
         ]
       },
       "tem": {
-        "defaultValue": 0.0,
         "value": [
           {"range": "[-100,-10]", "cost": 1.0, "description": "极低温"},
           {"range": "(-10,0]", "cost": 0.6, "description": "低温"},
@@ -116,7 +106,6 @@
         ]
       },
       "humidity": {
-        "defaultValue": 0.0,
         "value": [
           {"range": "[0,30]", "cost": 0.2, "description": "干燥"},
           {"range": "(30,60]", "cost": 0, "description": "舒适"},
@@ -127,7 +116,6 @@
     },
     "wdd": {
       "pressure": {
-        "defaultValue": 0.0,
         "value": [
           { "range": "(0,900]", "cost": 1.0, "description": "气压过低" },
           { "range": "(900,1050]", "cost": 0.0, "description": "正常气压" },
