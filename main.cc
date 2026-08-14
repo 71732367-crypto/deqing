@@ -57,9 +57,9 @@ int main() {
         }
 
         
-        std::cout << "basetiel范围: [" << projectBaseTile.west << ", " << projectBaseTile.south << "] 到 ["
+        std::cout << "baseTile范围: [" << projectBaseTile.west << ", " << projectBaseTile.south << "] 到 ["
                   << projectBaseTile.east << ", " << projectBaseTile.north << "]" << std::endl;
-        std::cout << "basetile高度范围: [" << projectBaseTile.bottom << ", " << projectBaseTile.top << "]" << std::endl;
+        std::cout << "baseTile高度范围: [" << projectBaseTile.bottom << ", " << projectBaseTile.top << "]" << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "初始化全局基础瓦片失败: " << e.what() << std::endl;

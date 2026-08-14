@@ -75,6 +75,36 @@ static double toNumber(const Json::Value& v) {
     return passLeft && passRight;
 }
 
+
+
+    // === 新增：多条件阈值校验器 ===
+    static bool isHitThreshold(const std::string& thresholdStr, double val) {
+        if (thresholdStr.empty()) return false;
+
+        // 按照 "||" 分割字符串
+        size_t pos = 0;
+        std::string s = thresholdStr;
+        std::vector<std::string> conditions;
+        while ((pos = s.find("||")) != std::string::npos) {
+            conditions.push_back(s.substr(0, pos));
+            s.erase(0, pos + 2);
+        }
+        conditions.push_back(s);
+        // 逐个判断是否触发阈值（触发代表不可通行）
+        for (const auto& cond : conditions) {
+            std::string c = cond;
+            // 去除空格
+            c.erase(std::remove_if(c.begin(), c.end(), ::isspace), c.end());
+            if (c.empty()) continue;
+
+            if (c.substr(0, 2) == ">=") { if (val >= std::stod(c.substr(2))) return true; }
+            else if (c.substr(0, 2) == "<=") { if (val <= std::stod(c.substr(2))) return true; }
+            else if (c[0] == '>') { if (val > std::stod(c.substr(1))) return true; }
+            else if (c[0] == '<') { if (val < std::stod(c.substr(1))) return true; }
+            else if (c.substr(0, 2) == "==") { if (std::fabs(val - std::stod(c.substr(2))) < 1e-9) return true; }
+        }
+        return false;
+    }
     // === 新增：动态代价提取器 ===
     /**
      * @brief 从前端传入的 JSON 规则配置中，提取当前数值对应的归一化代价 (0.0 ~ 1.0)
@@ -676,7 +706,13 @@ struct AsyncContext {
                                        }else {
                                            // 2. 核心：提取数值并走动态规则引擎
                                            double val = toNumber(hashVal[actualField]);
-
+                                           if (rule.expectedValue.isObject() && rule.expectedValue.isMember("threshold")) {
+                                               if (isHitThreshold(rule.expectedValue["threshold"].asString(), val)) {
+                                                   candPass = false;
+                                                   failReason = rule.description + " 触及极端阈值限制(threshold)";
+                                                   break;
+                                               }
+                                           }
                                            dynamicCost = extractDynamicCost(rule.expectedValue, val);
                                        }
                                         // 3. 根据前缀精准分发代价值
