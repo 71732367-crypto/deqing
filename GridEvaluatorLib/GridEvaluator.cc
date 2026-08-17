@@ -583,8 +583,9 @@ struct AsyncContext {
                                                     tm_et.tm_hour = h; tm_et.tm_min = m; tm_et.tm_sec = s;
                                                 }
 
-                                                int st = static_cast<int>(timegm(&tm_st));
-                                                int et = static_cast<int>(timegm(&tm_et));
+                                                // 减去 8 小时，将北京时间字符串正确转换为对应的 UTC 绝对时间戳
+                                                int st = static_cast<int>(timegm(&tm_st)) - 8 * 3600;
+                                                int et = static_cast<int>(timegm(&tm_et)) - 8 * 3600;
 
                                                 if (cand.arrivalTime >= st && cand.arrivalTime <= et) {
                                                     timeConflict = true;
@@ -612,8 +613,9 @@ struct AsyncContext {
                                                 tm_et.tm_hour = h; tm_et.tm_min = m; tm_et.tm_sec = s;
                                             }
 
-                                            int st = static_cast<int>(timegm(&tm_st));
-                                            int et = static_cast<int>(timegm(&tm_et));
+                                            // 减去 8 小时，将北京时间字符串正确转换为对应的 UTC 绝对时间戳
+                                            int st = static_cast<int>(timegm(&tm_st)) - 8 * 3600;
+                                            int et = static_cast<int>(timegm(&tm_et)) - 8 * 3600;
 
                                             if (cand.arrivalTime >= st && cand.arrivalTime <= et) {
                                                 timeConflict = true;
