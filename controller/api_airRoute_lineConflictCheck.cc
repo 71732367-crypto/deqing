@@ -83,7 +83,22 @@ void api_airRoute_lineConflictCheck::asyncHandleHttpRequest(const HttpRequestPtr
         }
 
         const BaseTile &baseTile = getProjectBaseTile();
-        const auto codes = plancheck::polylineToCodes((*body)["points"], level, baseTile);
+
+        // 解析并应用 workHeight
+        double workHeight = 0.0;
+        if (body->isMember("workHeight") && (*body)["workHeight"].isNumeric()) {
+            workHeight = (*body)["workHeight"].asDouble();
+        }
+
+        Json::Value points = (*body)["points"];
+        if (workHeight != 0.0) {
+            for (auto& p : points) {
+                if (p.isArray() && p.size() >= 3 && p[2].isNumeric()) {
+                    p[2] = p[2].asDouble() + workHeight;
+                }
+            }
+        }
+        const auto codes = plancheck::polylineToCodes(points, level, baseTile);
 
         if (isFirstConflictMode)
         {

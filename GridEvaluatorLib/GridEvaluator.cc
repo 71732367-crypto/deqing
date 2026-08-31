@@ -1,4 +1,4 @@
-#include "GridEvaluator.h"
+﻿#include "GridEvaluator.h"
 #include <cmath>
 #include <sstream>
 #include <unordered_set>
@@ -114,7 +114,7 @@ static double toNumber(const Json::Value& v) {
         if (ruleConfig.isMember("cost")) {
             double c = ruleConfig["cost"].asDouble();
             // 【加一行日志】
-  //          LOG_INFO << "命中静态代价 -> 实际值: " << actualVal << " | 提取代价: " << c;
+    //     LOG_INFO << "命中静态代价 -> 实际值: " << actualVal << " | 提取代价: " << c;
             return c;
         }
 
@@ -130,7 +130,7 @@ static double toNumber(const Json::Value& v) {
                     if (isValueInRange(rangeStr, actualVal)) {
                         double c = item["cost"].asDouble();
                         // 【加一行日志】
-        //                LOG_INFO << "命中区间代价 -> 区间: " << rangeStr << " | 实际值: " << actualVal << " | 提取代价: " << c;
+      //              LOG_INFO << "命中区间代价 -> 区间: " << rangeStr << " | 实际值: " << actualVal << " | 提取代价: " << c;
                         return c;
                     }
                 }
@@ -221,6 +221,7 @@ static const vector<RuleDef>& getRuleDefs() {
 
         // 航路与禁飞区等刚性拦截规则
         {"hl",  "string", "", "", true,  false, "航路校验：必须存在于航路规划中"},
+        {"dp",  "set", "", "", true,  false, "航线时空冲突(DP)"},
         {"hlz", "string", "", "", false, true,  "航路避让：当前区域存在航路，不可穿越"},
         {"fx",  "string", "", "", false, true,  "人口密集区域无法通行"},
         {"gd",  "string", "", "", false, true,  "存在三维实景障碍物冲突"},
@@ -296,7 +297,16 @@ GridEvaluator::GridEvaluator(const Json::Value& options) {
         // 检查是否为 DP（时空冲突）规则
         if (key.substr(0, 3) == "dp_") {
             hasDp_ = true;
-            LOG_INFO << "[GridEvaluator] Activated DP rule: " << key;
+
+            // ========== 必须加上这段提取层级的代码 ==========
+            try {
+                dpLevel_ = std::stoi(key.substr(3));
+            } catch(...) {
+                dpLevel_ = 0;
+            }
+            LOG_INFO << "[GridEvaluator] Activated DP rule: " << key << ", level: " << dpLevel_;
+            // ===========================================
+
             continue;
         }
 
@@ -340,7 +350,33 @@ GridEvaluator::GridEvaluator(const Json::Value& options) {
                     for(const auto& f : group.requestedFields) if(f == def.jsonPath) exists = true;
                     if(!exists) group.requestedFields.push_back(def.jsonPath);
                 }
-
+                else if (options[key].isMember("value") && options[key]["value"].isArray()) {
+                    for (const auto& item : options[key]["value"]) {
+                        if (item.isObject() && item.isMember("type") && item["type"].asString() == def.jsonPath) {
+                            meta.expectedValue = item;
+                            group.type = def.type;
+                            group.rules.push_back(meta);
+                            bool exists = false;
+                            for(const auto& f : group.requestedFields) if(f == def.jsonPath) exists = true;
+                            if(!exists) group.requestedFields.push_back(def.jsonPath);
+                            break;
+                        }
+                    }
+                }
+            }
+            // 3. 纯数组格式（上一次修改的版本）
+            else if (options[key].isArray()) {
+                for (const auto& item : options[key]) {
+                    if (item.isObject() && item.isMember("type") && item["type"].asString() == def.jsonPath) {
+                        meta.expectedValue = item;
+                        group.type = def.type;
+                        group.rules.push_back(meta);
+                        bool exists = false;
+                        for(const auto& f : group.requestedFields) if(f == def.jsonPath) exists = true;
+                        if(!exists) group.requestedFields.push_back(def.jsonPath);
+                        break;
+                    }
+                }
 
 
 
@@ -743,7 +779,11 @@ struct AsyncContext {
 
                 // === DP（时空冲突）检查 (保留原有逻辑) ===
                 if (candPass && evaluator->hasDp_ && cand.checkTimeRules) {
-                    string dpKey = "dp_" + cand.code;
+                    string sliceCode = cand.code;
+                    if (evaluator->dpLevel_ > 0 && sliceCode.length() > (size_t)evaluator->dpLevel_) {
+                        sliceCode = sliceCode.substr(0, evaluator->dpLevel_);
+                    }
+                    string dpKey = "dp_" + sliceCode;
                     if (evaluator->redisCache_.count(dpKey)) {
                         auto val = evaluator->redisCache_[dpKey];
                         if (val.isArray()) {
@@ -751,10 +791,14 @@ struct AsyncContext {
                                 string s = rangeStr.asString();
                                 auto parts = split(s, ':');
                                 if (parts.size() >= 2) {
-                                    double start = stod(parts[0]);
-                                    double end = stod(parts[1]);
-                                    if (cand.arrivalTime >= start && cand.arrivalTime <= end) {
-                                        candPass = false; failReason = "存在时空冲突"; break;
+                                    try {
+                                        double start = stod(parts[0]);
+                                        double end = stod(parts[1]);
+                                        if (cand.arrivalTime >= start && cand.arrivalTime <= end) {
+                                            candPass = false; failReason = "存在时空冲突"; break;
+                                        }
+                                    } catch (...) {
+                                        continue;
                                     }
                                 }
                             }
@@ -863,7 +907,11 @@ void GridEvaluator::checkCandidates(
 
             // DP 规则查询
             if (hasDp_ && cand.checkTimeRules) {
-                string dpKey = "dp_" + cand.code;
+                string sliceCode = cand.code;
+                if (dpLevel_ > 0 && sliceCode.length() > (size_t)dpLevel_) {
+                    sliceCode = sliceCode.substr(0, dpLevel_);
+                }
+                string dpKey = "dp_" + sliceCode;
                 if (!redisCache_.count(dpKey)) {
                     setKeys.push_back(dpKey);
                 }

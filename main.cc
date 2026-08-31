@@ -30,7 +30,7 @@ int main() {
     try {
         // 从JSON配置文件初始化全局基础瓦片数据
         std::string configFilePath = "./region.json";
-        
+
         // 检查配置文件是否存在
         std::ifstream configFile(configFilePath);
         if (!configFile.is_open()) {
@@ -45,22 +45,22 @@ int main() {
             configFile.open(configFilePath);
         }
 
-        
+
         if (!configFile.is_open()) {
             throw std::runtime_error("无法找到配置文件 region.json，请确保文件存在于 /app/region.json 或 ./region.json");
         }
         configFile.close();
-        
+
         // 使用配置文件初始化基础网格数据
         if (!initializeProjectBaseTileFromConfig(configFilePath)) {
             throw std::runtime_error("从配置文件初始化基础网格数据失败");
         }
 
-        
+
         std::cout << "baseTile范围: [" << projectBaseTile.west << ", " << projectBaseTile.south << "] 到 ["
                   << projectBaseTile.east << ", " << projectBaseTile.north << "]" << std::endl;
         std::cout << "baseTile高度范围: [" << projectBaseTile.bottom << ", " << projectBaseTile.top << "]" << std::endl;
-        
+
     } catch (const std::exception& e) {
         std::cerr << "初始化全局基础瓦片失败: " << e.what() << std::endl;
         return -1;
@@ -89,7 +89,7 @@ int main() {
             drogonConfigFile.open(drogonConfigPath);
         }
     }
-    
+
     if (!drogonConfigFile.is_open()) {
         std::cerr << "尝试的配置文件路径:" << std::endl;
         std::cerr << "1. ../config.json" << std::endl;
@@ -98,7 +98,7 @@ int main() {
         throw std::runtime_error("无法找到Drogon配置文件 config.json");
     }
     drogonConfigFile.close();
-    
+
     std::cout << "使用配置文件: " << drogonConfigPath << std::endl;
     drogon::app().loadConfigFile(drogonConfigPath);
 
