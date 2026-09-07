@@ -73,6 +73,8 @@ struct GridStamp {
     double arrivalTime{0.0};    // 到达该网格的时间（秒）
     int64_t wdTime{0};          // 天气数据时间戳，用于匹配对应时段的天气数据
     std::string wdRule;         // 天气规则类型（wdh_11为小时级，wdd_11为日级）
+    std::string centerCode;     //中心航线网格
+    size_t pathIndex{0};          //中心网格下标
 };
 
 // 规则表定义，返回系统中所有支持的规则集合
@@ -185,16 +187,68 @@ double getBeijingTime() {
     return static_cast<double>(std::time(nullptr)) + 8.0 * 3600.0;
 }
 
-// 从配置选项中提取飞行速度
-// @param options 包含speed字段的JSON对象
-// @return 飞行速度（单位：米/秒），默认为15.0
-double extractSpeed(const Json::Value &options) {
-    if (options.isObject() && options.isMember("speed") && options["speed"].isNumeric()) {
-        const double s = options["speed"].asDouble();
-        return s > 0.0 ? s : 15.0;
+// 获取网格层级对应的物理尺寸（米）。
+double getConflictGridSize(int level) {
+    if (level < 0 || level > 31) {
+        throw std::invalid_argument(
+        "不支持的网格层级:"+std::to_string(level));
     }
-    return 15.0;
+    const BaseTile& baseTile=getProjectBaseTile();
+    return baseTile.top/std::pow(2.0,level);
 }
+
+    //球形缓冲区Mask
+    std::vector<std::array<int, 3>> buildConflictSphericalMask(
+    int level,
+    double planeRadius)
+{
+    const double gridSize = getConflictGridSize(level);
+
+    std::vector<std::array<int, 3>> sphericalMask;
+
+    if (planeRadius > 0.0) {
+        const int extendCell =
+            static_cast<int>(std::ceil(planeRadius / gridSize));
+
+        for (int dx = -extendCell; dx <= extendCell; ++dx) {
+            for (int dy = -extendCell; dy <= extendCell; ++dy) {
+                for (int dz = -extendCell; dz <= extendCell; ++dz) {
+                    const double distance =
+                        std::sqrt(
+                            static_cast<double>(dx * dx) +
+                            static_cast<double>(dy * dy) +
+                            static_cast<double>(dz * dz)
+                        ) * gridSize;
+
+                    if (distance <= planeRadius) {
+                        sphericalMask.push_back({dx, dy, dz});
+                    }
+                }
+            }
+        }
+    }
+    // 没有半径时，只检查中心网格。
+    if (sphericalMask.empty()) {
+        sphericalMask.push_back({0, 0, 0});
+    }
+    // 与现有A*保持一致：
+    // 设置了正半径，但半径小于一个网格时，至少扩展一格，
+    // 最终使用中心及周围26格，共27格。
+    if (planeRadius > 0.0 && sphericalMask.size() == 1) {
+        sphericalMask.clear();
+
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    sphericalMask.push_back({dx, dy, dz});
+                }
+            }
+        }
+    }
+
+    return sphericalMask;
+}
+
 
 // 创建单个网格的时间戳信息（基于北京时间）
 // @param code 网格编码
@@ -233,36 +287,105 @@ GridStamp makeStamp(const std::string &code, double arrival, double nowSec) {
 // @param startSec 起始时间（秒，北京时间 UTC+8）
 // @param speed 飞行速度（米/秒）
 // @return 所有网格的时间戳信息列表
-std::vector<GridStamp> buildStamps(const std::vector<std::string> &codes, double startSec, double speed) {
-    std::vector<GridStamp> out;
-    if (codes.empty()) return out;
+std::vector<GridStamp> buildStamps(const std::vector<std::string> &codes,
+                                   double startSec,
+                                   double speed,
+                                   int level,
+                                   double planeRadius) {
+    std::vector<GridStamp> centerStamps;
+    if (codes.empty()) return centerStamps;
     // 获取当前时间（确保使用北京时间UTC+8）
     const double nowSec =   getBeijingTime();
-
+    const double gridSize = getConflictGridSize(level);
     // 将所有网格编码转换为行列高坐标（IJH）
-    std::vector<IJH> ijhs;
-    ijhs.reserve(codes.size());
-    for (const auto &c : codes) ijhs.push_back(getLocalTileRHC(c));
+    std::vector<IJH> centerCoordinates;
+    centerCoordinates.reserve(codes.size());
+    for (const auto &code : codes) centerCoordinates.push_back(getLocalTileRHC(code));
 
     // 从起始时间开始计算每个网格的到达时间
-    double current = startSec;
-    out.reserve(codes.size());
-    for (size_t i = 0; i < codes.size(); ++i) {
-        if (i > 0) {
+    double currentArrivalTime = startSec;
+    centerStamps.reserve(codes.size());
+    for (size_t index = 0; index < codes.size(); ++index) {
+        if (index > 0) {
             // 计算当前网格与前一个网格的距离
-            const auto &a = ijhs[i - 1];
-            const auto &b = ijhs[i];
-            const double dr = static_cast<double>(static_cast<int64_t>(a.row) - static_cast<int64_t>(b.row));
-            const double dc = static_cast<double>(static_cast<int64_t>(a.column) - static_cast<int64_t>(b.column));
-            const double dh = static_cast<double>(static_cast<int64_t>(a.layer) - static_cast<int64_t>(b.layer));
-            // 计算三维欧氏距离，乘以5.0是网格的物理尺寸（米）
-            const double stepDistance = std::sqrt(dr * dr + dc * dc + dh * dh) * 5.0;
+            const auto& previous = centerCoordinates[index - 1];
+            const auto& current = centerCoordinates[index];
+            const double rowDifference = static_cast<double>(static_cast<int64_t>(previous.row) - static_cast<int64_t>(current.row));
+            const double columnDifference = static_cast<double>(static_cast<int64_t>(previous.column) - static_cast<int64_t>(current.column));
+            const double layerDifference = static_cast<double>(static_cast<int64_t>(previous.layer) - static_cast<int64_t>(current.layer));
+            // 计算三维欧氏距离，乘以GridSize是网格的物理尺寸（米）
+            const double stepDistance =
+               std::sqrt(
+                   rowDifference * rowDifference +
+                   columnDifference * columnDifference +
+                   layerDifference * layerDifference
+               ) * gridSize;
             // 根据飞行速度计算飞行时间，并累加到当前时间
-            if (speed > 0.0) current += std::floor(stepDistance / speed);
+            if (speed > 0.0) {
+                currentArrivalTime +=
+                    std::floor(stepDistance / speed);
+            }
         }
-        out.push_back(makeStamp(codes[i], current, nowSec));
+        GridStamp centerStamp = makeStamp(codes[index], currentArrivalTime, nowSec);
+        centerStamp.centerCode = codes[index];
+        centerStamp.pathIndex = index;
+        centerStamps.push_back(std::move(centerStamp));
     }
-    return out;
+    // 第二步：以每个中心网格为基准进行球形膨胀。
+    const auto sphericalMask =
+        buildConflictSphericalMask(level, planeRadius);
+
+    std::vector<GridStamp> bufferedStamps;
+    bufferedStamps.reserve(
+        centerStamps.size() * sphericalMask.size());
+
+    // row、column、layer各自的合法范围是[0, 2^level)。
+    const uint64_t maxCoordinate = 1ULL << level;
+
+    for (const auto& centerStamp : centerStamps) {
+        const IJH center = getLocalTileRHC(centerStamp.code);
+
+        const int64_t centerX =
+            static_cast<int64_t>(center.column);
+        const int64_t centerY =
+            static_cast<int64_t>(center.row);
+        const int64_t centerZ =
+            static_cast<int64_t>(center.layer);
+
+        for (const auto& offset : sphericalMask) {
+            const int64_t bufferX = centerX + offset[0];
+            const int64_t bufferY = centerY + offset[1];
+            const int64_t bufferZ = centerZ + offset[2];
+
+            if (bufferX < 0 || bufferY < 0 || bufferZ < 0) {
+                continue;
+            }
+
+            if (static_cast<uint64_t>(bufferX) >= maxCoordinate ||
+                static_cast<uint64_t>(bufferY) >= maxCoordinate ||
+                static_cast<uint64_t>(bufferZ) >= maxCoordinate) {
+                continue;
+                }
+
+            const IJH bufferCoordinate = {
+                static_cast<uint32_t>(bufferY),
+                static_cast<uint32_t>(bufferX),
+                static_cast<uint32_t>(bufferZ)
+            };
+
+            GridStamp bufferStamp = centerStamp;
+
+            bufferStamp.code = rchToCode(
+                bufferCoordinate,
+                static_cast<uint8_t>(level));
+
+            // 缓冲网格继承中心网格的到达时间、天气时间和航线下标。
+            bufferedStamps.push_back(std::move(bufferStamp));
+        }
+    }
+
+    return bufferedStamps;
+
 }
 
 // 检查配置选项中是否包含时间冲突检查选项（dp_开头的选项）
@@ -418,7 +541,7 @@ struct AsyncContext {
                             if (e > 1e12) e /= 1000.0;
                             // 检查到达时间是否在已有时间范围内
                             if (st.arrivalTime >= s && st.arrivalTime <= e) {
-                                allConflicts.push_back({.code = st.code, .reason = "时间冲突：飞行时段与已有计划重叠", .index = idx});
+                                allConflicts.push_back({.code = st.code, .reason = "时间冲突：飞行时段与已有计划重叠", .index = st.pathIndex});
                                 break; // 找到时间冲突就跳出当前网格的时间范围检查
                             }
                         } catch (...) {}
@@ -467,7 +590,7 @@ struct AsyncContext {
                         // 检查值必须存在
                         if (rule->checkValueMustExist) {
                             if (!exists || val.empty()) {
-                                allConflicts.push_back({.code = st.code, .reason = rule->description, .index = idx});
+                                allConflicts.push_back({.code = st.code, .reason = rule->description, .index = st.pathIndex});
                                 break; // 找到冲突就跳出当前网格的当前类型规则检查
                             }
                             continue;
@@ -475,7 +598,7 @@ struct AsyncContext {
                         // 检查值必须为空
                         if (rule->checkValueNotEmpty) {
                             if (exists && !val.empty()) {
-                                allConflicts.push_back({.code = st.code, .reason = rule->description, .index = idx});
+                                allConflicts.push_back({.code = st.code, .reason = rule->description, .index = st.pathIndex});
                                 break; // 找到冲突就跳出当前网格的当前类型规则检查
                             }
                             continue;
@@ -489,7 +612,7 @@ struct AsyncContext {
 
                         // 评估约束条件
                         if (!evaluateConstraint(*rule, expected, exists ? Json::Value(val) : Json::Value::null)) {
-                            allConflicts.push_back({.code = st.code, .reason = rule->description, .index = idx});
+                            allConflicts.push_back({.code = st.code, .reason = rule->description, .index = st.pathIndex});
                             break; // 找到冲突就跳出当前网格的当前类型规则检查
                         }
                     }
@@ -507,13 +630,13 @@ struct AsyncContext {
                         if (isEmptyExpected(expected)) {
                             // ad_ 管制空域：前端未传空域类型时，Redis 有数据即冲突
                             if (rule->prefix == "ad" && !actual.empty()) {
-                                allConflicts.push_back({.code = st.code, .reason = rule->description, .index = idx});
+                                allConflicts.push_back({.code = st.code, .reason = rule->description, .index = st.pathIndex});
                                 break;
                             }
                             continue;
                         }
                         if (!evaluateConstraint(*rule, expected, actual)) {
-                            allConflicts.push_back({.code = st.code, .reason = rule->description, .index = idx});
+                            allConflicts.push_back({.code = st.code, .reason = rule->description, .index = st.pathIndex});
                             break;
                         }
                     }
@@ -530,7 +653,7 @@ struct AsyncContext {
                              const Json::Value expectedVal = expectedObj.isMember(rule->jsonPath) ? expectedObj[rule->jsonPath] : Json::Value();
                              if (isEmptyExpected(expectedVal)) continue;
                              if (!evaluateConstraint(*rule, expectedVal, valStr)) {
-                                 allConflicts.push_back({.code = st.code, .reason = rule->description, .index = idx});
+                                 allConflicts.push_back({.code = st.code, .reason = rule->description, .index = st.pathIndex});
                                  break; // 找到冲突就跳出当前网格的当前类型规则检查
                              }
                          }
@@ -616,10 +739,10 @@ struct AsyncContextFirst {
                                 conflictFound.store(true);
                                 ConflictResult result{
                                     .pass = false,
-                                    .conflicts = {{.code = st.code, .reason = "时间冲突：飞行时段与已有计划重叠", .index = idx}},
+                                    .conflicts = {{.code = st.code, .reason = "时间冲突：飞行时段与已有计划重叠", .index = st.pathIndex}},
                                     .code = st.code,
                                     .reason = "时间冲突：飞行时段与已有计划重叠",
-                                    .index = idx
+                                    .index = st.pathIndex
                                 };
                                 callback(result);
                                 return; // 找到第一个冲突，立即返回
@@ -672,10 +795,10 @@ struct AsyncContextFirst {
                                 conflictFound.store(true);
                                 ConflictResult result{
                                     .pass = false,
-                                    .conflicts = {{.code = st.code, .reason = rule->description, .index = idx}},
+                                    .conflicts = {{.code = st.code, .reason = rule->description, .index = st.pathIndex}},
                                     .code = st.code,
                                     .reason = rule->description,
-                                    .index = idx
+                                    .index = st.pathIndex
                                 };
                                 callback(result);
                                 return; // 找到第一个冲突，立即返回
@@ -688,10 +811,10 @@ struct AsyncContextFirst {
                                 conflictFound.store(true);
                                 ConflictResult result{
                                     .pass = false,
-                                    .conflicts = {{.code = st.code, .reason = rule->description, .index = idx}},
+                                    .conflicts = {{.code = st.code, .reason = rule->description, .index = st.pathIndex}},
                                     .code = st.code,
                                     .reason = rule->description,
-                                    .index = idx
+                                    .index = st.pathIndex
                                 };
                                 callback(result);
                                 return; // 找到第一个冲突，立即返回
@@ -710,10 +833,10 @@ struct AsyncContextFirst {
                             conflictFound.store(true);
                             ConflictResult result{
                                 .pass = false,
-                                .conflicts = {{.code = st.code, .reason = rule->description, .index = idx}},
+                                .conflicts = {{.code = st.code, .reason = rule->description, .index = st.pathIndex}},
                                 .code = st.code,
                                 .reason = rule->description,
-                                .index = idx
+                                .index = st.pathIndex
                             };
                             callback(result);
                             return; // 找到第一个冲突，立即返回
@@ -736,10 +859,10 @@ struct AsyncContextFirst {
                                 conflictFound.store(true);
                                 ConflictResult result{
                                     .pass = false,
-                                    .conflicts = {{.code = st.code, .reason = rule->description, .index = idx}},
+                                    .conflicts = {{.code = st.code, .reason = rule->description, .index = st.pathIndex}},
                                     .code = st.code,
                                     .reason = rule->description,
-                                    .index = idx
+                                    .index = st.pathIndex
                                 };
                                 callback(result);
                                 return;
@@ -750,10 +873,10 @@ struct AsyncContextFirst {
                             conflictFound.store(true);
                             ConflictResult result{
                                 .pass = false,
-                                .conflicts = {{.code = st.code, .reason = rule->description, .index = idx}},
+                                .conflicts = {{.code = st.code, .reason = rule->description, .index = st.pathIndex}},
                                 .code = st.code,
                                 .reason = rule->description,
-                                .index = idx
+                                .index = st.pathIndex
                             };
                             callback(result);
                             return;
@@ -775,10 +898,10 @@ struct AsyncContextFirst {
                                  conflictFound.store(true);
                                  ConflictResult result{
                                      .pass = false,
-                                     .conflicts = {{.code = st.code, .reason = rule->description, .index = idx}},
+                                     .conflicts = {{.code = st.code, .reason = rule->description, .index = st.pathIndex}},
                                      .code = st.code,
                                      .reason = rule->description,
-                                     .index = idx
+                                     .index = st.pathIndex
                                  };
                                  callback(result);
                                  return; // 找到第一个冲突，立即返回
@@ -827,12 +950,18 @@ std::vector<std::string> polylineToCodes(const Json::Value &points, int level, c
 // 检查飞行路径上的网格冲突（核心功能函数）
 // @param codes 路径上的网格编码列表
 // @param startTimeMsOrSec 起始时间（毫秒或秒，北京时间 UTC+8）
+// @param level 航线网格层级
+// @param planeRadius 飞行器球形缓冲半径（米）
+// @param speed 飞行速度（米/秒）
 // @param options 配置选项，包含各种检查规则的配置
 // @param redis Redis客户端，用于查询网格的状态数据
 // @param callback 检查完成后的回调函数，返回ConflictResult结果
 void checkLineConflict(
     const std::vector<std::string> &codes,
     double startTimeMsOrSec,
+    int level,
+    double planeRadius,
+    double speed,
     const Json::Value &options,
     const std::shared_ptr<RedisClient> &redis,
     std::function<void(ConflictResult)> callback)
@@ -841,9 +970,8 @@ void checkLineConflict(
     if (codes.empty()) { callback({.pass = true}); return; }
     if (!redis) { callback({.pass = false, .code = "", .reason = "redis_unavailable"}); return; }
 
-    // 标准化起始时间，提取飞行速度
+    // 标准化起始时间；speed 已由控制器统一完成参数校验。
     const double startSec = normalizeStartSeconds(startTimeMsOrSec);
-    const double speed = extractSpeed(options);
 
     // 创建异步上下文
     auto ctx = std::make_shared<AsyncContext>();
@@ -854,7 +982,12 @@ void checkLineConflict(
 
     // 构建所有网格的时间戳信息
     try {
-        ctx->stamps = buildStamps(codes, startSec, speed);
+        ctx->stamps = buildStamps(
+            codes,
+            startSec,
+            speed,
+            level,
+            planeRadius);
     } catch (...) {
         callback({.pass = false, .code = codes.front(), .reason = "invalid_code"});
         return;
@@ -1005,12 +1138,18 @@ void checkLineConflict(
 // 检查飞行路径上的网格冲突（遇到第一个冲突即返回版本）
 // @param codes 路径上的网格编码列表
 // @param startTimeMsOrSec 起始时间（毫秒或秒，北京时间 UTC+8）
+// @param level 航线网格层级
+// @param planeRadius 飞行器球形缓冲半径（米）
+// @param speed 飞行速度（米/秒）
 // @param options 配置选项
 // @param redis Redis客户端
 // @param callback 回调函数
 void checkLineConflictFirst(
     const std::vector<std::string> &codes,
     double startTimeMsOrSec,
+    int level,
+    double planeRadius,
+    double speed,
     const Json::Value &options,
     const std::shared_ptr<RedisClient> &redis,
     std::function<void(ConflictResult)> callback)
@@ -1019,9 +1158,8 @@ void checkLineConflictFirst(
     if (codes.empty()) { callback({.pass = true}); return; }
     if (!redis) { callback({.pass = false, .code = "", .reason = "redis_unavailable"}); return; }
 
-    // 标准化起始时间，提取飞行速度
+    // 标准化起始时间；speed 已由控制器统一完成参数校验。
     const double startSec = normalizeStartSeconds(startTimeMsOrSec);
-    const double speed = extractSpeed(options);
 
     // 创建异步上下文（第一个冲突版本）
     auto ctx = std::make_shared<AsyncContextFirst>();
@@ -1032,9 +1170,14 @@ void checkLineConflictFirst(
 
     // 构建所有网格的时间戳信息
     try {
-        ctx->stamps = buildStamps(codes, startSec, speed);
+        ctx->stamps = buildStamps(
+            codes,
+            startSec,
+            speed,
+            level,
+            planeRadius);
     } catch (...) {
-        callback({.pass = false, .code = codes.front(), .reason = "invalid_code"});
+        callback({.pass = false, .code = codes.front(), .reason = "无效编码"});
         return;
     }
 

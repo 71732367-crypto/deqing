@@ -5,6 +5,7 @@
 #include <dqg/Data.h>
 #include "conditionCheck.h"
 #include <dqg/DQG3DProximity.h>
+#include <cmath>
 
 using drogon::HttpRequestPtr;
 using drogon::HttpResponse;
@@ -68,8 +69,63 @@ void api_airRoute_lineConflictCheck::asyncHandleHttpRequest(const HttpRequestPtr
             return;
         }
 
+        if (body->isMember("planeRadius") && !(*body)["planeRadius"].isNumeric()) {
+            (*resp)["status"] = "error";
+            (*resp)["message"] = "planeRadius 必须是数值";
+            auto out = HttpResponse::newHttpJsonResponse(*resp);
+            out->setStatusCode(k400BadRequest);
+            callback(out);
+            return;
+        }
+
+        const double planeRadius = body->get("planeRadius", 0.75).asDouble();
+        if (!std::isfinite(planeRadius) || planeRadius < 0.0) {
+            (*resp)["status"] = "error";
+            (*resp)["message"] = "planeRadius 必须是大于等于0的有限数值";
+            auto out = HttpResponse::newHttpJsonResponse(*resp);
+            out->setStatusCode(k400BadRequest);
+            callback(out);
+            return;
+        }
+
         Json::Value options = body->get("condition", Json::Value(Json::objectValue));
-        if (!options.isObject()) options = Json::Value(Json::objectValue);
+        if (!options.isObject()) {
+            options = Json::Value(Json::objectValue);
+        }
+
+        // 新请求统一使用顶层 speed；同时兼容原有 condition.speed。
+        double speed = 15.0;
+        if (body->isMember("speed")) {
+            if (!(*body)["speed"].isNumeric()) {
+                (*resp)["status"] = "error";
+                (*resp)["message"] = "speed 必须是数值";
+                auto out = HttpResponse::newHttpJsonResponse(*resp);
+                out->setStatusCode(k400BadRequest);
+                callback(out);
+                return;
+            }
+            speed = (*body)["speed"].asDouble();
+        } else if (options.isMember("speed")) {
+            if (!options["speed"].isNumeric()) {
+                (*resp)["status"] = "error";
+                (*resp)["message"] = "condition.speed 必须是数值";
+                auto out = HttpResponse::newHttpJsonResponse(*resp);
+                out->setStatusCode(k400BadRequest);
+                callback(out);
+                return;
+            }
+            speed = options["speed"].asDouble();
+        }
+
+        if (!std::isfinite(speed) || speed <= 0.0) {
+            (*resp)["status"] = "error";
+            (*resp)["message"] = "speed 必须是大于0的有限数值";
+
+            auto out = HttpResponse::newHttpJsonResponse(*resp);
+            out->setStatusCode(k400BadRequest);
+            callback(out);
+            return;
+        }
 
         auto redisClient = app().getRedisClient();
         if (!redisClient)
@@ -103,7 +159,14 @@ void api_airRoute_lineConflictCheck::asyncHandleHttpRequest(const HttpRequestPtr
         if (isFirstConflictMode)
         {
             // 调用第一个冲突模式的检测函数
-            plancheck::checkLineConflictFirst(codes, startTime, options, redisClient,
+            plancheck::checkLineConflictFirst(
+                codes,
+                startTime,
+                level,
+                planeRadius,
+                speed,
+                options,
+                redisClient,
                 [callback, resp, baseTile](plancheck::ConflictResult result) {
                     if (!result.pass)
                     {
@@ -162,7 +225,14 @@ void api_airRoute_lineConflictCheck::asyncHandleHttpRequest(const HttpRequestPtr
         else
         {
             // 调用异步检测函数（返回所有冲突），在 Lambda 回调中处理结果
-            plancheck::checkLineConflict(codes, startTime, options, redisClient,
+            plancheck::checkLineConflict(
+                codes,
+                startTime,
+                level,
+                planeRadius,
+                speed,
+                options,
+                redisClient,
                 [callback, resp, baseTile](plancheck::ConflictResult result) {
                     if (!result.pass)
                     {

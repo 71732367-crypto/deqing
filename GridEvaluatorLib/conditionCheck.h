@@ -37,12 +37,18 @@ namespace plancheck {
 	 * @brief 针对网格编码序列执行冲突检测 (异步回调版本)。
 	 * @param codes 网格编码列表
 	 * @param startTimeMsOrSec 起飞时间
+	 * @param level 航线网格层级
+	 * @param planeRadius 飞行器球形缓冲半径（米）
+	 * @param speed 飞行速度（米/秒）
 	 * @param options 检测配置选项
 	 * @param redis Redis客户端智能指针
 	 * @param callback 检查完成后的回调函数，参数为 ConflictResult
 	 */
 	void checkLineConflict(const std::vector<std::string> &codes,
 						   double startTimeMsOrSec,
+						   int level,
+						   double planeRadius,
+						   double speed,
 						   const Json::Value &options,
 						   const std::shared_ptr<drogon::nosql::RedisClient> &redis,
 						   std::function<void(ConflictResult)> callback);
@@ -51,12 +57,18 @@ namespace plancheck {
 	 * @brief 针对网格编码序列执行冲突检测，遇到第一个冲突即返回 (异步回调版本)。
 	 * @param codes 网格编码列表
 	 * @param startTimeMsOrSec 起飞时间
+	 * @param level 航线网格层级
+	 * @param planeRadius 飞行器球形缓冲半径（米）
+	 * @param speed 飞行速度（米/秒）
 	 * @param options 检测配置选项
 	 * @param redis Redis客户端智能指针
 	 * @param callback 检查完成后的回调函数，参数为 ConflictResult
 	 */
 	void checkLineConflictFirst(const std::vector<std::string> &codes,
 								 double startTimeMsOrSec,
+								 int level,
+								 double planeRadius,
+								 double speed,
 								 const Json::Value &options,
 								 const std::shared_ptr<drogon::nosql::RedisClient> &redis,
 								 std::function<void(ConflictResult)> callback);

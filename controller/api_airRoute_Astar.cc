@@ -320,13 +320,11 @@ static std::vector<std::pair<double, double>> generateLocalCandidates2D(
         double baseAngle = std::atan2(poly[0].second - currentLat, poly[0].first - currentLon);
         double maxDiff = -1e9, minDiff = 1e9;
         size_t leftIdx = 0, rightIdx = 0;
-        
         for (size_t i = 0; i < len; ++i) {
             double a = std::atan2(poly[i].second - currentLat, poly[i].first - currentLon);
             double diff = a - baseAngle;
             while(diff > M_PI) diff -= 2 * M_PI;
             while(diff < -M_PI) diff += 2 * M_PI;
-            
             if (diff > maxDiff) { maxDiff = diff; leftIdx = i; }
             if (diff < minDiff) { minDiff = diff; rightIdx = i; }
         }
@@ -381,7 +379,6 @@ static std::vector<std::pair<double, double>> generateLocalCandidates2D(
     if ((int)candidates.size() > MAX_K) candidates.resize(MAX_K);
     return candidates;
 }
-
 
       //新增时间解析
       void insertVectorBypassWaypoints(std::vector<std::array<int, 3>>& waypoints, int level, const BaseTile& baseTile, RouteMode mode, int startTime) {
@@ -749,7 +746,6 @@ static std::vector<std::pair<double, double>> generateLocalCandidates2D(
                           failReason += " 起点/终点可能被完全包围，或者生成的绕行候选点全被其他障碍物阻挡导致无法继续探索。";
                       }
                   }
-                  
                   LOG_WARN << "[VisGraph Bypass] 增量可见性图搜索失败，航段 " << seg
                            << " 保持原始直连。失败详情: " << failReason;
               }
@@ -1043,9 +1039,9 @@ Task<AStarResult> aStarPath(
 
     double hWeight = 1.2;
     if (routeMode == RouteMode::SAFEST) {
-        hWeight = 1.5;
+        hWeight = 1.2;
     } else if (routeMode == RouteMode::BALANCED) {
-        hWeight = 1.5;
+        hWeight = 1.2;
     } else if (routeMode == RouteMode::SHORTEST) {
         hWeight =1.2;
     }
@@ -1071,6 +1067,39 @@ Task<AStarResult> aStarPath(
             return f > o.f; // 只需要比较 f 值，性能更好
         }
     };
+//==================================================================================
+      //球行包围避障逻辑计算
+//==================================================================================
+      std::vector<std::array<int,3>>sphericalMask;
+      int exendCell=0;
+      if (planeRadius>0) {
+          exendCell =std::ceil(planeRadius/gridSize);
+          for (int dx =-exendCell; dx <= exendCell; ++dx) {
+              for (int dy =-exendCell; dy <= exendCell; ++dy) {
+                  for (int dz = -exendCell; dz <= exendCell; ++dz) {
+                      double dist=std::sqrt(dx*dx+dy*dy+dz*dz)*gridSize;
+                      if (dist<=planeRadius) {
+                          sphericalMask.push_back({dx,dy,dz});
+                      }
+                  }
+              }
+          }
+      }
+      if (sphericalMask.empty()) {
+          sphericalMask.push_back({0, 0, 0});
+      }
+      //最少一格缓冲区
+      if (planeRadius > 0 && sphericalMask.size() == 1) {
+          sphericalMask.clear(); // 清空原本只有 {0,0,0} 的数组
+          for (int dx = -1; dx <= 1; ++dx) {
+              for (int dy = -1; dy <= 1; ++dy) {
+                  for (int dz = -1; dz <= 1; ++dz) {
+                      sphericalMask.push_back({dx, dy, dz});
+                  }
+              }
+          }
+      }
+
 
 
     priority_queue<Node, vector<Node>, greater<Node>> openSet;
@@ -1129,7 +1158,7 @@ Task<AStarResult> aStarPath(
         candidateListForChecker.reserve(26);
 
         uint64_t maxCoord = (1ULL << (3 * level));
-
+        std::unordered_set<std::string> addedCodes;
         // 遍历 26 个方向
         for (size_t i = 0; i < DIRECTIONS.size(); ++i) {
             const auto& d = DIRECTIONS[i];
@@ -1182,7 +1211,30 @@ Task<AStarResult> aStarPath(
             }
             // ==========================================
             validNeighbors.push_back({nx, ny, nz, code, moveDist, arrival});
-            candidateListForChecker.push_back({code, arrival, norm.wdTime, norm.wdRule, true});
+
+
+
+
+
+            // ==========================================
+            // [修改] 叠加球形 Mask：将无人机占据的所有网格送入 Redis 检查
+            // ==========================================
+            for (const auto& offset: sphericalMask) {
+                int mx=nx+offset[0];
+                int my=ny+offset[1];
+                int mz=nz+offset[2];
+                if (mx<0||my<0||mz<0) continue;
+                if (static_cast<uint64_t>(mx) >= maxCoord ||
+                    static_cast<uint64_t>(my) >= maxCoord ||
+                    static_cast<uint64_t>(mz) >= maxCoord) continue;
+                IJH maskIJH = {(uint32_t)my, (uint32_t)mx, (uint32_t)mz};
+                std::string maskCode = rchToCode(maskIJH, static_cast<uint8_t>(level));
+
+                if (addedCodes.find(maskCode) == addedCodes.end()) {
+                    addedCodes.insert(maskCode);
+                    candidateListForChecker.push_back({maskCode, arrival, norm.wdTime, norm.wdRule, true});
+                }
+            }
         }
 
         std::shared_ptr<std::unordered_map<string, GridEvaluator::CheckResult>> checkResultsPtr;
@@ -1190,34 +1242,49 @@ Task<AStarResult> aStarPath(
             checkResultsPtr = co_await GridCheckAwaiter{evaluator, candidateListForChecker};
         }
 
-        // 邻居缓冲区检查：如果任何一个生成的 26 邻居网格被阻挡，抛弃整个当前节点扩展
+        // 邻居缓冲区检查：包围球有一个网格碰撞整个节点就丢弃
         bool allNeighborsPassable = true;
         bool skipNeighborBufferCheck = (cur.key == startKey);
-        if (!skipNeighborBufferCheck) {
-            for (const auto& nb : validNeighbors) {
-                if (checkResultsPtr && checkResultsPtr->count(nb.code)) {
-                    const auto& res = checkResultsPtr->at(nb.code);
-                    if (!res.pass) {
-                        allNeighborsPassable = false;
-                        lastFailReason = "缓冲区检查失败: 邻居网格 " + nb.code + " " + res.reason;
-                        break;
-                    }
-                } else {
-                    allNeighborsPassable = false;
-                    lastFailReason = "缓冲区检查失败: 邻居网格 " + nb.code + " 无检查结果";
-                    break;
-                }
-            }
-        }
 
-        if (!allNeighborsPassable) {
-            continue;
+        std::vector<NeighborMeta>passedNeighbors;
+
+       if (!skipNeighborBufferCheck) {
+           for (const auto& nb:validNeighbors) {
+               bool neighborIsSafe = true;
+               for (const auto&offset: sphericalMask) {
+                   int mx = nb.x+offset[0],my = nb.y+offset[1],mz = nb.z+offset[2];
+                   if (mx < 0 || my < 0 || mz < 0 || mx >= maxCoord || my >= maxCoord || mz >= maxCoord) continue;
+                   IJH mIJH = {(uint32_t)my, (uint32_t)mx, (uint32_t)mz};
+                   std::string mCode = rchToCode(mIJH, static_cast<uint8_t>(level));
+                   if (checkResultsPtr && checkResultsPtr->count(mCode)) {
+                       if (!checkResultsPtr->at(mCode).pass) {
+                           neighborIsSafe = false;
+                           lastFailReason = "碰撞: 网格 " + mCode;
+                           break;
+                       }
+                   }else {
+                       neighborIsSafe = false; // 无数据也视为不安全
+                       break;
+                   }
+               }
+               if (neighborIsSafe) {
+                   passedNeighbors.push_back(nb); // 该邻居整体安全，允许飞行
+               }
+           }
+
+       } else {
+           passedNeighbors = validNeighbors; // 起点不校验
+       }
+        if (passedNeighbors.empty()) {
+            continue; // 所有邻居都撞了，才会抛弃当前扩展
         }
 
         // ==========================================
         // 计算邻居节点的累积代价值 (融合转向惩罚)
         // ==========================================
-        for (const auto& nb : validNeighbors) {
+        for (const auto& nb : passedNeighbors) {
+            // 【新增】防御性编程：防止起点周围的网格因缺失数据导致 at() 抛出异常崩溃
+            if (!checkResultsPtr || !checkResultsPtr->count(nb.code)) continue;
             const auto& res = checkResultsPtr->at(nb.code);
 
             double distanceCost = nb.moveCost;
@@ -1271,6 +1338,7 @@ Task<AStarResult> aStarPath(
         std::shared_ptr<GridEvaluator> evaluator, // 修复：统一变量名为 evaluator
         int startTime,
         uint8_t level,
+        double planeRadius,
         bool enableTrueHeightCheck,
         RouteMode currentMode
     )
@@ -1283,6 +1351,38 @@ Task<AStarResult> aStarPath(
         const BaseTile& baseTile = ::getProjectBaseTile(); // 获取基准瓦片范围，用于坐标转换
         uint64_t maxCoord = (1ull << (3 * level)); //用于边界检测
         int currentTime = getBeijingTime(); //用于时间规则统一
+
+        // 使用与普通 A* 相同的无人机球形缓冲区规则
+        double gridSize = getGridSize(level);
+        std::vector<std::array<int, 3>> sphericalMask;
+        int extendCell = 0;
+        if (planeRadius > 0) {
+            extendCell = static_cast<int>(std::ceil(planeRadius / gridSize));
+            for (int dx = -extendCell; dx <= extendCell; ++dx) {
+                for (int dy = -extendCell; dy <= extendCell; ++dy) {
+                    for (int dz = -extendCell; dz <= extendCell; ++dz) {
+                        double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
+                        if (dist <= planeRadius) {
+                            sphericalMask.push_back({dx, dy, dz});
+                        }
+                    }
+                }
+            }
+        }
+        if (sphericalMask.empty()) {
+            sphericalMask.push_back({0, 0, 0});
+        }
+        // 与普通 A* 保持一致：设置了半径时至少扩展一格缓冲区
+        if (planeRadius > 0 && sphericalMask.size() == 1) {
+            sphericalMask.clear();
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        sphericalMask.push_back({dx, dy, dz});
+                    }
+                }
+            }
+        }
 
         RouteWeights weights = getWeightsByMode(currentMode);
         auto calcPenalty = [&](const GridEvaluator::CheckResult& res) {
@@ -1312,21 +1412,19 @@ Task<AStarResult> aStarPath(
                 {p2.longitude, p2.latitude, p2.height}
             };
             std::vector<std::string> lineGrids = singleLineToGrids2(lineReq, level, baseTile); //拉取直线
-            //26个方向膨胀建立缓冲区
+            // 按无人机半径建立球形缓冲区
             std::unordered_set<std::string> expandedGridSet;
             for (const auto& code : lineGrids)
             {
-                expandedGridSet.insert(code); //加入中心网格
                 IJH centerIJH = getLocalTileRHC(code);
                 int cx = centerIJH.column;
                 int cy = centerIJH.row;
                 int cz = centerIJH.layer;
-                //扩展26个邻居保持一格宽缓冲区
-                for (const auto& d : DIRECTIONS)
+                for (const auto& offset : sphericalMask)
                 {
-                    int nx = cx + d[0];
-                    int ny = cy + d[1];
-                    int nz = cz + d[2];
+                    int nx = cx + offset[0];
+                    int ny = cy + offset[1];
+                    int nz = cz + offset[2];
                     // 边界保护：兼容负高度和坐标越界
                     if (nx < 0 || ny < 0 || nz < 0) continue;
                     if (static_cast<uint64_t>(nx) >= maxCoord || static_cast<uint64_t>(ny) >= maxCoord || static_cast<uint64_t>(nz) >= maxCoord) continue;
@@ -1497,7 +1595,30 @@ Task<AStarResult> aStarPath(
         int startTime = (rawStartTime > 9999999999LL) ? static_cast<int>(rawStartTime / 1000) : rawStartTime;
 
         double planeRadius = (*jsonBody).get("planeRadius", 0.75).asDouble();
-        double cruisingSpeed = (*jsonBody).get("cruisingSpeed", 15.0).asDouble();
+
+        // speed 统一表示飞行速度，单位为米/秒。
+        if (jsonBody->isMember("speed") && !(*jsonBody)["speed"].isNumeric()) {
+            Json::Value response;
+            response["status"] = "error";
+            response["message"] = "speed 必须是数值";
+
+            auto resp = HttpResponse::newHttpJsonResponse(response);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            co_return;
+        }
+
+        const double speed = (*jsonBody).get("speed", 15.0).asDouble();
+        if (!std::isfinite(speed) || speed <= 0.0) {
+            Json::Value response;
+            response["status"] = "error";
+            response["message"] = "speed 必须是大于0的有限数值";
+
+            auto resp = HttpResponse::newHttpJsonResponse(response);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            co_return;
+        }
 
         if (!jsonBody->isMember("workHeight")) {
             Json::Value response; response["status"] = "error"; response["message"] = "缺少必需参数: workHeight";
@@ -1598,7 +1719,7 @@ Task<AStarResult> aStarPath(
         int workLayer = startWorkLayer;
 
         AStarOptions options;
-        options.speed = cruisingSpeed;
+        options.speed = speed;
 
         RouteMode currentMode = RouteMode::ORIGINAL; //默认为原始A星
         if (jsonBody->isMember("route_type")) {
@@ -1711,7 +1832,7 @@ Task<AStarResult> aStarPath(
             // 调用平滑函数 (根据 applySmoothing 标志决定是否执行)
             if (applySmoothing && !isUnconstrained && !segmentResult.path.empty() && gridEvaluator) {
                 LOG_INFO << "[A*] 航段 " << i+1 << " 开始执行A*航线抽稀...";
-                segmentResult.path = co_await thinPathGreedy(segmentResult.path, gridEvaluator, currentSegmentStartTime, level, enableTrueHeightCheck, currentMode);
+                segmentResult.path = co_await thinPathGreedy(segmentResult.path, gridEvaluator, currentSegmentStartTime, level, planeRadius, enableTrueHeightCheck, currentMode);
             }
             if (!segmentResult.path.empty()) {
                 double stepGridSize = getGridSize(level);
