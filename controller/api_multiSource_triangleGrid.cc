@@ -38,9 +38,9 @@ using namespace api::multiSource;
  * @param updateContent 更新内容描述
  * @return 是否成功插入日志
  */
-bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient, 
-                     const std::string& moduleCode, 
-                     const std::string& moduleName, 
+bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
+                     const std::string& moduleCode,
+                     const std::string& moduleName,
                      const std::string& updateContent) {
     try {
         // 检查并创建 update_log 表（如果不存在）
@@ -48,7 +48,7 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
             std::string checkTableSql = "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'update_log')";
             auto result = dbClient->execSqlSync(checkTableSql);
             bool tableExists = result[0]["exists"].as<bool>();
-            
+
             if (!tableExists) {
                 // 创建 update_log 表
                 try {
@@ -56,9 +56,9 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
                     std::string createSeqSql = "CREATE SEQUENCE IF NOT EXISTS update_log_id_seq "
                                                 "START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1";
                     dbClient->execSqlSync(createSeqSql);
-                    
+
                     // 创建表
-                    std::string createTableSql = 
+                    std::string createTableSql =
                         "CREATE TABLE \"public\".\"update_log\" ("
                         "\"id\" int8 NOT NULL DEFAULT nextval('update_log_id_seq'::regclass),"
                         "\"module_code\" varchar(100) COLLATE \"pg_catalog\".\"default\" NOT NULL,"
@@ -68,26 +68,26 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
                         "\"update_time\" timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP"
                         ")";
                     dbClient->execSqlSync(createTableSql);
-                    
+
                     // 创建索引
-                    std::string createIndex1Sql = 
+                    std::string createIndex1Sql =
                         "CREATE INDEX \"idx_update_log_module_time\" ON \"public\".\"update_log\" USING btree ("
                         "\"module_code\" COLLATE \"pg_catalog\".\"default\" \"pg_catalog\".\"text_ops\" ASC NULLS LAST,"
                         "\"create_time\" \"pg_catalog\".\"timestamp_ops\" DESC NULLS FIRST"
                         ")";
                     dbClient->execSqlSync(createIndex1Sql);
-                    
-                    std::string createIndex2Sql = 
+
+                    std::string createIndex2Sql =
                         "CREATE INDEX \"idx_update_log_update_time\" ON \"public\".\"update_log\" USING btree ("
                         "\"module_code\" COLLATE \"pg_catalog\".\"default\" \"pg_catalog\".\"text_ops\" ASC NULLS LAST,"
                         "\"update_time\" \"pg_catalog\".\"timestamp_ops\" DESC NULLS FIRST"
                         ")";
                     dbClient->execSqlSync(createIndex2Sql);
-                    
+
                     // 设置主键
                     std::string createPkSql = "ALTER TABLE \"public\".\"update_log\" ADD CONSTRAINT \"update_log_pkey\" PRIMARY KEY (\"id\")";
                     dbClient->execSqlSync(createPkSql);
-                    
+
                     LOG_INFO << "成功创建 update_log 表";
                 } catch (const drogon::orm::DrogonDbException &e) {
                     LOG_ERROR << "创建 update_log 表过程中出错: " << e.base().what();
@@ -99,7 +99,7 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
             LOG_ERROR << "检查或创建 update_log 表失败: " << e.base().what();
             // 继续尝试插入，可能表已经存在但检查失败
         }
-        
+
         std::string sql = "INSERT INTO update_log (module_code, module_name, update_content, create_time, update_time) "
                          "VALUES ($1, $2, $3, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')";
         dbClient->execSqlSync(sql, moduleCode, moduleName, updateContent);
@@ -381,20 +381,20 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                         if (std::isnan(t.vertex1.Lng) || std::isnan(t.vertex1.Lat) || std::isnan(t.vertex1.Hgt) ||
                             std::isnan(t.vertex2.Lng) || std::isnan(t.vertex2.Lat) || std::isnan(t.vertex2.Hgt) ||
                             std::isnan(t.vertex3.Lng) || std::isnan(t.vertex3.Lat) || std::isnan(t.vertex3.Hgt)) continue;
-                        
+
                         // 过滤边界外的三角形，防止转换局部坐标时发生无符号整型下溢。
                         // 这里只检查 2D 经纬度边界，不检查高度 (Hgt)，因为 region.json 往往没有配置高度，默认 top 会极小导致误杀。
                         auto isOutside = [&](const PointLBHd& p) {
                             return p.Lng < baseTile.west || p.Lng > baseTile.east ||
                                    p.Lat < baseTile.south || p.Lat > baseTile.north;
                         };
-                        
+
                         // 只要有任何一个顶点在基准瓦片边界外，就过滤掉（避免映射到uint32_t时下溢为极大值）
                         if (isOutside(t.vertex1) || isOutside(t.vertex2) || isOutside(t.vertex3)) {
                             localDiscarded++;
                             continue;
                         }
-                        
+
                         try {
                             IJH p1 = localRowColHeiNumber(gridLevelUint, t.vertex1.Lng, t.vertex1.Lat, t.vertex1.Hgt, baseTile);
                             IJH p2 = localRowColHeiNumber(gridLevelUint, t.vertex2.Lng, t.vertex2.Lat, t.vertex2.Hgt, baseTile);

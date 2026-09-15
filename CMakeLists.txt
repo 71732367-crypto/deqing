@@ -59,6 +59,7 @@ find_package(jsoncpp CONFIG REQUIRED)
 find_package(TBB REQUIRED)
 find_package(PostgreSQL REQUIRED)
 find_package(GEOS REQUIRED)
+find_package(PROJ REQUIRED)
 
 # ##############################################################################
 # 可执行文件定义和源文件列表
@@ -72,6 +73,7 @@ add_executable(${PROJECT_NAME} main.cc
         controller/api_multiSource_airSpace.cc
         controller/api_airRoute_pointConflictCheck.cc
         controller/api_airRoute_Astar.cc
+        controller/VisibilityGraphPlanner.cc
         controller/api_airRoute_lineConflictCheck.cc
         GridEvaluatorLib/GridEvaluator.cc
         GridEvaluatorLib/conditionCheck.cc
@@ -92,6 +94,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         dqglib
         TBB::tbb
         ${PostgreSQL_LIBRARIES}
+        PROJ::proj
         geos
         geos_c
 
@@ -107,6 +110,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
         dqglib
         TBB::tbb
         ${PostgreSQL_LIBRARIES}
+        PROJ::proj
         geos
         geos_c)
 

@@ -1,5 +1,6 @@
 #include "api_airRoute_Astar.h"
 #include "GridEvaluator.h"
+#include "VisibilityGraphPlanner.h"
 #include <drogon/drogon.h>
 #include <trantor/net/EventLoop.h>
 #include <dqg/DQG3DBasic.h>
@@ -17,9 +18,15 @@
 #include <array>
 #include <cmath>
 #include <ctime>
+#include <cstdio>
+#include <iomanip>
+#include <optional>
+#include <sstream>
 #include <utility>
 #include <memory>
 #include <cstdlib>
+#include <chrono>
+#include <mutex>
 #include "TIFF.h"
 #include <geos/geom/GeometryFactory.h>
 #include <geos/geom/Geometry.h>
@@ -191,45 +198,45 @@ struct GridCheckAwaiter {
   namespace {
       struct VectorObstacle {
           std::string id;
-          std::unique_ptr<geos::geom::Geometry> geom;
           std::vector<std::pair<double, double>> vertices;
-          double alt_min;
-          double alt_max;
       };
 
-      // 新增：判断时间戳是否落在逗号分隔的风险时间段内 (例如: "00:00-09:00,17:00-24:00")
-      bool isTimeInRiskRanges(int timestamp, const std::string& timeRanges) {
-          if (timeRanges.empty()) return false;
+      struct CachedFenceObstacle {
+          std::string id;
+          std::string timeRestrictions;
+          VectorObstacle geometry;
+      };
 
-          std::time_t t = timestamp;
-          std::tm* tm_info = std::localtime(&t);
-          int currentMinutes = tm_info->tm_hour * 60 + tm_info->tm_min;
+      struct CachedRiskObstacle {
+          std::string id;
+          std::string emergencyDate;
+          std::string emergencyLowRiskTime;
+          std::string emergencyMidRiskTime;
+          std::string emergencyHighRiskTime;
+          std::string workdayLowRiskTime;
+          std::string workdayMidRiskTime;
+          std::string workdayHighRiskTime;
+          std::string weekendLowRiskTime;
+          std::string weekendMidRiskTime;
+          std::string weekendHighRiskTime;
+          VectorObstacle geometry;
+      };
 
-          std::stringstream ss(timeRanges);
-          std::string range;
-          while (std::getline(ss, range, ',')) {
-              if (range.length() >= 11) {
-                  int startMin = std::stoi(range.substr(0, 2)) * 60 + std::stoi(range.substr(3, 2));
-                  int endMin = std::stoi(range.substr(6, 2)) * 60 + std::stoi(range.substr(9, 2));
-                  if (currentMinutes >= startMin && currentMinutes <= endMin) {
-                      return true;
-                  }
-              }
-          }
-          return false;
-      }
+      struct DatabaseObstacleCache {
+          long long graphId = -1;
+          long long graphVersion = -1;
+          std::chrono::steady_clock::time_point loadedAt{};
+          std::unordered_set<std::string> graphTemporaryFenceIds;
+          std::vector<VectorObstacle> airSpace;
+          std::vector<CachedFenceObstacle> fences;
+          std::vector<CachedRiskObstacle> risks;
+          bool risksLoaded = false;
+      };
 
+      std::mutex databaseObstacleCacheMutex;
+      std::shared_ptr<const DatabaseObstacleCache> databaseObstacleCache;
+      constexpr std::chrono::seconds databaseObstacleCacheTtl(30);
 
-      //todo: ============== 增量可见性图 辅助结构 ============
-
-     /// 射线与障碍物多边形边的碰撞结果
-struct RayHitInfo {
-    const VectorObstacle* obstacle;   // 被击中的障碍物指针
-    size_t obstacleIdx;               // 在 obstacles 数组中的索引
-    size_t edgeI1, edgeI2;            // 被击中的边的两个顶点索引 (在 vertices 中)
-    double hitLon, hitLat;            // 交点经纬度
-    double distFromOrigin;            // 交点到射线起点的距离
-};
 /// 2D 线段求交（带 ε 容差，防止顶点穿模）
 /// 返回值：是否相交；若相交，hitLon/hitLat 填入交点
 static bool segmentIntersect2D(
@@ -249,34 +256,26 @@ static bool segmentIntersect2D(
     }
     return false;
 }
-/// 射线探测：从 fromLon/fromLat 到 toLon/toLat，遍历所有障碍物多边形，
-/// 返回距起点最近的碰撞信息（仅做2D平面碰撞，高度交由主循环外部判断）
-static std::optional<RayHitInfo> raycastObstacles2D(
+/// 判断二维线段是否穿过任一障碍物边界。
+static bool segmentHitsAnyObstacle2D(
     double fromLon, double fromLat,
     double toLon, double toLat,
     const std::vector<VectorObstacle>& obstacles)
 {
-    std::optional<RayHitInfo> closest;
-    double minDist = std::numeric_limits<double>::max();
-    for (size_t oi = 0; oi < obstacles.size(); ++oi) {
-        const auto& verts = obstacles[oi].vertices;
+    for (const auto& obstacle : obstacles) {
+        const auto& verts = obstacle.vertices;
         if (verts.size() < 3) continue;
         for (size_t i = 0; i < verts.size(); ++i) {
             size_t j = (i + 1) % verts.size();
             double hx, hy;
             if (segmentIntersect2D(fromLon, fromLat, toLon, toLat,
                                    verts[i].first, verts[i].second,
-                                   verts[j].first, verts[j].second, hx, hy))
-            {
-                double dist = std::hypot(hx - fromLon, hy - fromLat);
-                if (dist < minDist) {
-                    minDist = dist;
-                    closest = RayHitInfo{&obstacles[oi], oi, i, j, hx, hy, dist};
-                }
+                                   verts[j].first, verts[j].second, hx, hy)) {
+                return true;
             }
         }
     }
-    return closest;
+    return false;
 }
 /// 点-in-多边形 检测 (射线法, 2D)
 static bool pointInAnyObstacle2D(double lon, double lat,
@@ -297,461 +296,583 @@ static bool pointInAnyObstacle2D(double lon, double lat,
     }
     return false;
 }
-/// 局部拐点生成：对碰撞边 (i1, i2) 及其一阶邻接顶点，
-/// 用外法线安全膨胀算子生成候选绕行点
-static std::vector<std::pair<double, double>> generateLocalCandidates2D(
-    const RayHitInfo& hit,
-    double currentLon, double currentLat,
-    double goalLon, double goalLat,
-    double bufferDeg,                              // 安全缓冲距离（经纬度度数）
-    const std::vector<VectorObstacle>& obstacles,
-    const std::unordered_set<size_t>& closedHashes, // 容差去重集合
-    int MAX_K = 4)
-{
-    const auto& poly = hit.obstacle->vertices;
-    size_t len = poly.size();
-    // 提取碰撞边两端点，并加入基于当前视角的宏观左右切点
-    std::set<size_t> targetIndices = {
-        hit.edgeI1,
-        hit.edgeI2
-    };
+      struct BeijingTimeParts {
+          std::tm value{};
+          int minutes = 0;
+          int dateKey = 0;
+          std::string dateTime;
+      };
 
-    if (len > 0) {
-        double baseAngle = std::atan2(poly[0].second - currentLat, poly[0].first - currentLon);
-        double maxDiff = -1e9, minDiff = 1e9;
-        size_t leftIdx = 0, rightIdx = 0;
-        for (size_t i = 0; i < len; ++i) {
-            double a = std::atan2(poly[i].second - currentLat, poly[i].first - currentLon);
-            double diff = a - baseAngle;
-            while(diff > M_PI) diff -= 2 * M_PI;
-            while(diff < -M_PI) diff += 2 * M_PI;
-            if (diff > maxDiff) { maxDiff = diff; leftIdx = i; }
-            if (diff < minDiff) { minDiff = diff; rightIdx = i; }
-        }
-        targetIndices.insert(leftIdx);
-        targetIndices.insert(rightIdx);
+      BeijingTimeParts getBeijingTimeParts(int timestamp) {
+          const std::time_t beijingTimestamp = static_cast<std::time_t>(timestamp) + 8 * 3600;
+          BeijingTimeParts result;
+          gmtime_r(&beijingTimestamp, &result.value);
+          result.minutes = result.value.tm_hour * 60 + result.value.tm_min;
+          result.dateKey = (result.value.tm_year + 1900) * 10000 +
+                           (result.value.tm_mon + 1) * 100 + result.value.tm_mday;
+          std::ostringstream stream;
+          stream << std::put_time(&result.value, "%Y-%m-%d %H:%M:%S");
+          result.dateTime = stream.str();
+          return result;
+      }
 
-    }
-    std::vector<std::pair<double, double>> candidates;
-    for (size_t idx : targetIndices) {
-        size_t iPrev = (idx + len - 1) % len;
-        size_t iNext = (idx + 1) % len;
-        double px = poly[iPrev].first,  py = poly[iPrev].second;
-        double cx = poly[idx].first,    cy = poly[idx].second;
-        double nx = poly[iNext].first,  ny = poly[iNext].second;
-        // 入边向量 v1 = curr - prev，出边向量 v2 = next - curr
-        double v1x = cx - px, v1y = cy - py;
-        double v2x = nx - cx, v2y = ny - cy;
-        double l1 = std::hypot(v1x, v1y);
-        double l2 = std::hypot(v2x, v2y);
-        if (l1 < 1e-12 || l2 < 1e-12) continue;
-        // 入边法向量 n1 = (v1y, -v1x) / l1
-        double n1x = v1y / l1, n1y = -v1x / l1;
-        // 出边法向量 n2 = (v2y, -v2x) / l2
-        double n2x = v2y / l2, n2y = -v2x / l2;
-        // 合成外法线方向
-        double outX = n1x + n2x, outY = n1y + n2y;
-        double outLen = std::hypot(outX, outY);
-        if (outLen < 0.01) { outX = n1x; outY = n1y; }
-        else { outX /= outLen; outY /= outLen; }
-        // 候选点 = 顶点 + 外法线 × 缓冲距离
-        double cpLon = cx + outX * bufferDeg;
-        double cpLat = cy + outY * bufferDeg;
-        // 如果候选点落入障碍物内部，翻转方向
-        if (pointInAnyObstacle2D(cpLon, cpLat, obstacles)) {
-            cpLon = cx - outX * bufferDeg;
-            cpLat = cy - outY * bufferDeg;
-        }
-        // 再次校验：翻转后仍然在障碍物内部则丢弃
-        if (pointInAnyObstacle2D(cpLon, cpLat, obstacles)) continue;
-        // 容差去重（哈希检查）
-        size_t h = std::hash<double>{}(std::round(cpLon * 1e6)) ^
-                   (std::hash<double>{}(std::round(cpLat * 1e6)) << 1);
-        if (closedHashes.count(h)) continue;
-        candidates.push_back({cpLon, cpLat});
-    }
-    // 按到终点距离升序排列，取前 K 个
-    std::sort(candidates.begin(), candidates.end(),
-        [goalLon, goalLat](const auto& a, const auto& b) {
-            return std::hypot(a.first - goalLon, a.second - goalLat)
-                 < std::hypot(b.first - goalLon, b.second - goalLat);
-        });
-    if ((int)candidates.size() > MAX_K) candidates.resize(MAX_K);
-    return candidates;
-}
+      std::vector<std::string> splitText(const std::string& text, char separator) {
+          std::vector<std::string> values;
+          std::stringstream stream(text);
+          std::string value;
+          while (std::getline(stream, value, separator)) {
+              values.push_back(value);
+          }
+          return values;
+      }
 
-      //新增时间解析
-      void insertVectorBypassWaypoints(std::vector<std::array<int, 3>>& waypoints, int level, const BaseTile& baseTile, RouteMode mode, int startTime) {
-          if (waypoints.empty()) return;
+      bool parseHourMinute(const std::string& text, int& minutes) {
+          int hour = 0;
+          int minute = 0;
+          if (std::sscanf(text.c_str(), "%d:%d", &hour, &minute) != 2 ||
+              hour < 0 || hour > 24 || minute < 0 || minute > 59 ||
+              (hour == 24 && minute != 0)) {
+              return false;
+          }
+          minutes = hour * 60 + minute;
+          return true;
+      }
 
-          auto db = drogon::app().getDbClient("default");
-          if (!db) return;
-          std::vector<VectorObstacle> obstacles;
+      bool isMinuteInRanges(int currentMinutes, const std::string& ranges) {
+          for (const auto& rawRange : splitText(ranges, ',')) {
+              const size_t separator = rawRange.find('-');
+              if (separator == std::string::npos) {
+                  continue;
+              }
+              int startMinutes = 0;
+              int endMinutes = 0;
+              if (!parseHourMinute(rawRange.substr(0, separator), startMinutes) ||
+                  !parseHourMinute(rawRange.substr(separator + 1), endMinutes)) {
+                  continue;
+              }
+              if (startMinutes <= endMinutes) {
+                  if (currentMinutes >= startMinutes &&
+                      (currentMinutes < endMinutes || endMinutes == 1440)) {
+                      return true;
+                  }
+              } else if (currentMinutes >= startMinutes || currentMinutes < endMinutes) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      bool parseDateKey(const std::string& text, int& dateKey) {
+          int year = 0;
+          int month = 0;
+          int day = 0;
+          if (std::sscanf(text.c_str(), "%d.%d.%d", &year, &month, &day) != 3 &&
+              std::sscanf(text.c_str(), "%d-%d-%d", &year, &month, &day) != 3) {
+              return false;
+          }
+          if (month < 1 || month > 12 || day < 1 || day > 31) {
+              return false;
+          }
+          dateKey = year * 10000 + month * 100 + day;
+          return true;
+      }
+
+      std::optional<size_t> matchingEmergencyRule(
+          int dateKey,
+          const std::string& emergencyDates) {
+          const auto entries = splitText(emergencyDates, ';');
+          for (size_t index = 0; index < entries.size(); ++index) {
+              const std::string& entry = entries[index];
+              int startDate = 0;
+              int endDate = 0;
+              if (entry.size() >= 21) {
+                  const size_t separator = entry.find('-', 10);
+                  if (separator != std::string::npos &&
+                      parseDateKey(entry.substr(0, separator), startDate) &&
+                      parseDateKey(entry.substr(separator + 1), endDate) &&
+                      dateKey >= startDate && dateKey <= endDate) {
+                      return index;
+                  }
+              } else if (parseDateKey(entry, startDate) && dateKey == startDate) {
+                  return index;
+              }
+          }
+          return std::nullopt;
+      }
+
+      std::string emergencyTimeAt(const std::string& value, size_t index) {
+          const auto entries = splitText(value, ';');
+          return index < entries.size() ? entries[index] : std::string();
+      }
+
+      std::string rowText(const drogon::orm::Row& row, const std::string& field) {
+          return row[field].isNull() ? std::string() : row[field].as<std::string>();
+      }
+
+      int riskLevelAtTime(
+          const std::string& emergencyDate,
+          const std::string& emergencyLowRiskTime,
+          const std::string& emergencyMidRiskTime,
+          const std::string& emergencyHighRiskTime,
+          const std::string& workdayLowRiskTime,
+          const std::string& workdayMidRiskTime,
+          const std::string& workdayHighRiskTime,
+          const std::string& weekendLowRiskTime,
+          const std::string& weekendMidRiskTime,
+          const std::string& weekendHighRiskTime,
+          const BeijingTimeParts& time) {
+          std::string low;
+          std::string mid;
+          std::string high;
+          const auto emergencyIndex = matchingEmergencyRule(time.dateKey, emergencyDate);
+          if (emergencyIndex.has_value()) {
+              low = emergencyTimeAt(emergencyLowRiskTime, *emergencyIndex);
+              mid = emergencyTimeAt(emergencyMidRiskTime, *emergencyIndex);
+              high = emergencyTimeAt(emergencyHighRiskTime, *emergencyIndex);
+          } else {
+              const bool weekend = time.value.tm_wday == 0 || time.value.tm_wday == 6;
+              if (weekend) {
+                  low = weekendLowRiskTime;
+                  mid = weekendMidRiskTime;
+                  high = weekendHighRiskTime;
+              } else {
+                  low = workdayLowRiskTime;
+                  mid = workdayMidRiskTime;
+                  high = workdayHighRiskTime;
+              }
+          }
+
+          if (isMinuteInRanges(time.minutes, high)) return 3;
+          if (isMinuteInRanges(time.minutes, mid)) return 2;
+          if (isMinuteInRanges(time.minutes, low)) return 1;
+          return 0;
+      }
+
+      int riskLevelAtTime(const drogon::orm::Row& row, const BeijingTimeParts& time) {
+          return riskLevelAtTime(
+              rowText(row, "emergency_date"),
+              rowText(row, "emergency_low_risk_time"),
+              rowText(row, "emergency_mid_risk_time"),
+              rowText(row, "emergency_high_risk_time"),
+              rowText(row, "workday_low_risk_time"),
+              rowText(row, "workday_mid_risk_time"),
+              rowText(row, "workday_high_risk_time"),
+              rowText(row, "weekend_low_risk_time"),
+              rowText(row, "weekend_mid_risk_time"),
+              rowText(row, "weekend_high_risk_time"),
+              time);
+      }
+
+      bool modeBlocksRisk(RouteMode mode, int riskLevel) {
+          if (mode == RouteMode::SAFEST) return riskLevel >= 1;
+          if (mode == RouteMode::BALANCED) return riskLevel >= 2;
+          return false;
+      }
+
+      bool isTemporaryFenceActive(
+          const std::string& restrictionsText,
+          const BeijingTimeParts& time) {
+          if (restrictionsText.empty()) return true;
+          Json::Value restrictions;
+          Json::Reader reader;
+          if (!reader.parse(restrictionsText, restrictions) || !restrictions.isObject()) {
+              return true;
+          }
+
+          const auto& dateRange = restrictions["timeRange"];
+          if (dateRange.isArray() && dateRange.size() >= 2 &&
+              dateRange[0].isString() && dateRange[1].isString() &&
+              !dateRange[0].asString().empty() && !dateRange[1].asString().empty()) {
+              if (time.dateTime < dateRange[0].asString() ||
+                  time.dateTime > dateRange[1].asString()) {
+                  return false;
+              }
+          }
+
+          const auto& days = restrictions["daysActive"];
+          if (days.isArray() && !days.empty()) {
+              static const std::array<const char*, 7> names = {
+                  "Sunday", "Monday", "Tuesday", "Wednesday",
+                  "Thursday", "Friday", "Saturday"};
+              bool matched = false;
+              for (const auto& day : days) {
+                  if (day.isString() && day.asString() == names[time.value.tm_wday]) {
+                      matched = true;
+                      break;
+                  }
+              }
+              if (!matched) return false;
+          }
+
+          const auto& dayRange = restrictions["dayTimeRange"];
+          if (dayRange.isArray() && dayRange.size() >= 2 &&
+              dayRange[0].isString() && dayRange[1].isString() &&
+              !dayRange[0].asString().empty() && !dayRange[1].asString().empty()) {
+              return isMinuteInRanges(
+                  time.minutes, dayRange[0].asString() + "-" + dayRange[1].asString());
+          }
+          return true;
+      }
+
+      bool jsonNumber(const Json::Value& value, double& output) {
           try {
-              auto result = db->execSqlSync("SELECT id, boundary_data, alt_min, alt_max, shape FROM air_space WHERE space_type = 'WG' AND alt_min IS NOT NULL AND alt_max IS NOT NULL");
-              geos::geom::GeometryFactory::Ptr factory = geos::geom::GeometryFactory::create();
-              geos::io::WKTReader wktReader(factory.get());
-              for (auto row : result) {
-                  VectorObstacle obs;
-                  obs.id = row["id"].as<std::string>();
-                  obs.alt_min = row["alt_min"].as<double>();
-                  obs.alt_max = row["alt_max"].as<double>();
+              if (value.isNumeric()) {
+                  output = value.asDouble();
+                  return std::isfinite(output);
+              }
+              if (value.isString()) {
+                  output = std::stod(value.asString());
+                  return std::isfinite(output);
+              }
+          } catch (...) {
+          }
+          return false;
+      }
 
-                  std::string boundaryStr = row["boundary_data"].as<std::string>();
-                  int shape = 1;
-                  try {
-                      if (!row["shape"].isNull()) {
-                          shape = row["shape"].as<int>();
-                      }
-                  } catch(...) {}
-                  Json::Value boundaryJson;
-                  Json::Reader reader;
-                  if (reader.parse(boundaryStr, boundaryJson) && boundaryJson.isArray() && boundaryJson.size() > 0) {
-                      if (shape == 2 && boundaryJson[0].isMember("radius")) {
-                          double centerLon = boundaryJson[0]["longitude"].asDouble();
-                          double centerLat = boundaryJson[0]["latitude"].asDouble();
-                          double radius_m = 0.0;
-                          if (boundaryJson[0]["radius"].isString()) {
-                              radius_m = std::stod(boundaryJson[0]["radius"].asString());
-                          } else if (boundaryJson[0]["radius"].isNumeric()) {
-                              radius_m = boundaryJson[0]["radius"].asDouble();
-                          }
+      void appendPolygonObstacle(
+          const std::string& id,
+          const Json::Value& points,
+          std::vector<VectorObstacle>& obstacles) {
+          if (!points.isArray() || points.size() < 3) return;
+          VectorObstacle obstacle;
+          obstacle.id = id;
+          for (const auto& point : points) {
+              if (!point.isObject()) return;
+              double longitude = 0.0;
+              double latitude = 0.0;
+              if (!jsonNumber(point["longitude"], longitude) ||
+                  !jsonNumber(point["latitude"], latitude)) {
+                  return;
+              }
+              obstacle.vertices.emplace_back(longitude, latitude);
+          }
+          obstacles.push_back(std::move(obstacle));
+      }
 
-                          double lat_deg_m = 111320.0;
-                          double lon_deg_m = 111320.0 * std::cos(centerLat * M_PI / 180.0);
+      void appendCircleObstacle(
+          const std::string& id,
+          const Json::Value& value,
+          std::vector<VectorObstacle>& obstacles) {
+          if (!value.isArray() || value.empty() || !value[0].isObject()) return;
+          double longitude = 0.0;
+          double latitude = 0.0;
+          double radius = 0.0;
+          if (!jsonNumber(value[0]["longitude"], longitude) ||
+              !jsonNumber(value[0]["latitude"], latitude) ||
+              !jsonNumber(value[0]["radius"], radius) || radius <= 0.0) {
+              return;
+          }
+          Json::Value points(Json::arrayValue);
+          constexpr int segments = 64;
+          const double longitudeMeters = 111320.0 * std::cos(latitude * M_PI / 180.0);
+          for (int index = 0; index < segments; ++index) {
+              const double angle = 2.0 * M_PI * index / segments;
+              Json::Value point;
+              point["longitude"] = longitude + radius * std::cos(angle) / longitudeMeters;
+              point["latitude"] = latitude + radius * std::sin(angle) / 111320.0;
+              points.append(point);
+          }
+          appendPolygonObstacle(id, points, obstacles);
+      }
 
-                          int num_segments = 32;
-                          std::string wkt = "POLYGON((";
-                          for (int i = 0; i < num_segments; ++i) {
-                              double angle = 2.0 * M_PI * i / num_segments;
-                              double d_lon = (radius_m * std::cos(angle)) / lon_deg_m;
-                              double d_lat = (radius_m * std::sin(angle)) / lat_deg_m;
-                              double lon = centerLon + d_lon;
-                              double lat = centerLat + d_lat;
-                              obs.vertices.push_back({lon, lat});
-                              wkt += std::to_string(lon) + " " + std::to_string(lat) + ", ";
-                          }
-                          double first_lon = centerLon + (radius_m * std::cos(0)) / lon_deg_m;
-                          double first_lat = centerLat + (radius_m * std::sin(0)) / lat_deg_m;
-                          wkt += std::to_string(first_lon) + " " + std::to_string(first_lat) + "))";
+      void appendWktObstacle(
+          const std::string& id,
+          const std::string& wkt,
+          geos::io::WKTReader& reader,
+          std::vector<VectorObstacle>& obstacles) {
+          auto geometry = reader.read(wkt);
+          if (!geometry || geometry->isEmpty()) return;
+          auto coordinates = geometry->getCoordinates();
+          if (!coordinates || coordinates->getSize() < 3) return;
 
-                          obs.geom = wktReader.read(wkt);
-                          obstacles.push_back(std::move(obs));
-                      }
-                      else if (boundaryJson.size() >= 3) {
-                          std::string wkt = "POLYGON((";
-                          for (size_t i = 0; i < boundaryJson.size(); ++i) {
-                              double lon = boundaryJson[static_cast<int>(i)]["longitude"].asDouble();
-                              double lat = boundaryJson[static_cast<int>(i)]["latitude"].asDouble();
-                              obs.vertices.push_back({lon, lat});
-                              wkt += std::to_string(lon) + " " + std::to_string(lat);
-                              wkt += ", ";
-                          }
-                          double firstLon = boundaryJson[0]["longitude"].asDouble();
-                          double firstLat = boundaryJson[0]["latitude"].asDouble();
-                          wkt += std::to_string(firstLon) + " " + std::to_string(firstLat) + "))";
+          VectorObstacle obstacle;
+          obstacle.id = id;
+          obstacle.vertices.reserve(coordinates->getSize());
+          for (size_t index = 0; index < coordinates->getSize(); ++index) {
+              const auto& coordinate = coordinates->getAt(index);
+              obstacle.vertices.emplace_back(coordinate.x, coordinate.y);
+          }
+          obstacles.push_back(std::move(obstacle));
+      }
 
-                          obs.geom = wktReader.read(wkt);
-                          obstacles.push_back(std::move(obs));
+      std::shared_ptr<const DatabaseObstacleCache> getDatabaseObstacleCache(
+          const drogon::orm::DbClientPtr& db,
+          bool loadRisks) {
+          const auto graphRows = db->execSqlSync(
+              "SELECT id, graph_version FROM air_space_graph "
+              "WHERE graph_name = 'deqing' AND is_active = TRUE "
+              "ORDER BY graph_version DESC LIMIT 1");
+          const long long graphId = graphRows.empty() ? -1 : graphRows[0]["id"].as<long long>();
+          const long long graphVersion = graphRows.empty()
+              ? -1 : graphRows[0]["graph_version"].as<long long>();
+          const auto now = std::chrono::steady_clock::now();
 
+          std::lock_guard<std::mutex> lock(databaseObstacleCacheMutex);
+          const bool staticCacheFresh =
+              databaseObstacleCache &&
+              databaseObstacleCache->graphId == graphId &&
+              databaseObstacleCache->graphVersion == graphVersion &&
+              now - databaseObstacleCache->loadedAt < databaseObstacleCacheTtl;
+          const bool riskCacheReady = !loadRisks ||
+              (staticCacheFresh && databaseObstacleCache->risksLoaded);
+          if (staticCacheFresh && riskCacheReady) {
+              return databaseObstacleCache;
+          }
+
+          auto refreshed = staticCacheFresh
+              ? std::make_shared<DatabaseObstacleCache>(*databaseObstacleCache)
+              : std::make_shared<DatabaseObstacleCache>();
+
+          if (!staticCacheFresh) {
+              refreshed->graphId = graphId;
+              refreshed->graphVersion = graphVersion;
+              refreshed->loadedAt = now;
+              refreshed->graphTemporaryFenceIds.clear();
+              refreshed->airSpace.clear();
+              refreshed->fences.clear();
+              refreshed->risks.clear();
+              refreshed->risksLoaded = false;
+
+              if (graphId >= 0) {
+                  const auto temporaryRows = db->execSqlSync(
+                      "SELECT DISTINCT item->>'id' AS id "
+                      "FROM air_space_graph_edge e "
+                      "CROSS JOIN LATERAL jsonb_array_elements(e.temporary_fences) item "
+                      "WHERE e.graph_id = $1",
+                      graphId);
+                  for (const auto& row : temporaryRows) {
+                      if (!row["id"].isNull()) {
+                          refreshed->graphTemporaryFenceIds.insert(row["id"].as<std::string>());
                       }
                   }
               }
-          } catch(const std::exception& e) {
-              LOG_ERROR << "Failed to load vector obstacles: " << e.what();
+
+              const auto airSpaceRows = db->execSqlSync(
+                  "SELECT id, shape, boundary_data::text AS boundary_data "
+                  "FROM air_space WHERE space_type = 'WG'");
+              for (const auto& row : airSpaceRows) {
+                  Json::Value boundary;
+                  Json::Reader reader;
+                  if (!reader.parse(rowText(row, "boundary_data"), boundary)) continue;
+
+                  std::vector<VectorObstacle> parsed;
+                  const std::string id = row["id"].as<std::string>();
+                  if (rowText(row, "shape") == "2") {
+                      appendCircleObstacle(id, boundary, parsed);
+                  } else {
+                      appendPolygonObstacle(id, boundary, parsed);
+                  }
+                  if (!parsed.empty()) {
+                      refreshed->airSpace.push_back(std::move(parsed.front()));
+                  }
+              }
+
+              const auto fenceRows = db->execSqlSync(
+                  "SELECT id, time_restrictions::text AS time_restrictions, "
+                  "boundary::text AS boundary FROM fence");
+              for (const auto& row : fenceRows) {
+                  Json::Value boundary;
+                  Json::Reader reader;
+                  if (!reader.parse(rowText(row, "boundary"), boundary) ||
+                      !boundary.isObject()) {
+                      continue;
+                  }
+
+                  std::vector<VectorObstacle> parsed;
+                  const std::string id = row["id"].as<std::string>();
+                  const Json::Value& points = boundary["boundaryData"];
+                  if (boundary["shape"].asString() == "2") {
+                      appendCircleObstacle(id, points, parsed);
+                  } else {
+                      appendPolygonObstacle(id, points, parsed);
+                  }
+                  CachedFenceObstacle fence;
+                  fence.id = id;
+                  fence.timeRestrictions = rowText(row, "time_restrictions");
+                  if (!parsed.empty()) fence.geometry = std::move(parsed.front());
+                  // 即使几何无效，也保留记录，保证临时围栏仍能阻断可见图边。
+                  refreshed->fences.push_back(std::move(fence));
+              }
+          }
+
+          if (loadRisks && !refreshed->risksLoaded) {
+              const auto riskRows = db->execSqlSync(
+                  "SELECT a.id, a.emergency_date, a.emergency_low_risk_time, "
+                  "a.emergency_mid_risk_time, a.emergency_high_risk_time, "
+                  "r.workday_low_risk_time, r.workday_mid_risk_time, "
+                  "r.workday_high_risk_time, r.weekend_low_risk_time, "
+                  "r.weekend_mid_risk_time, r.weekend_high_risk_time, "
+                  "ST_AsText(parts.geom) AS geom_wkt "
+                  "FROM risk_area a JOIN risk_area_rule r ON r.type = a.type "
+                  "CROSS JOIN LATERAL ST_Dump(ST_CollectionExtract("
+                  "ST_MakeValid(a.geom), 3)) parts");
+              auto factory = geos::geom::GeometryFactory::create();
+              geos::io::WKTReader wktReader(factory.get());
+              refreshed->risks.clear();
+              for (const auto& row : riskRows) {
+                  CachedRiskObstacle risk;
+                  risk.id = row["id"].as<std::string>();
+                  risk.emergencyDate = rowText(row, "emergency_date");
+                  risk.emergencyLowRiskTime = rowText(row, "emergency_low_risk_time");
+                  risk.emergencyMidRiskTime = rowText(row, "emergency_mid_risk_time");
+                  risk.emergencyHighRiskTime = rowText(row, "emergency_high_risk_time");
+                  risk.workdayLowRiskTime = rowText(row, "workday_low_risk_time");
+                  risk.workdayMidRiskTime = rowText(row, "workday_mid_risk_time");
+                  risk.workdayHighRiskTime = rowText(row, "workday_high_risk_time");
+                  risk.weekendLowRiskTime = rowText(row, "weekend_low_risk_time");
+                  risk.weekendMidRiskTime = rowText(row, "weekend_mid_risk_time");
+                  risk.weekendHighRiskTime = rowText(row, "weekend_high_risk_time");
+                  std::vector<VectorObstacle> parsed;
+                  appendWktObstacle(risk.id, rowText(row, "geom_wkt"), wktReader, parsed);
+                  if (!parsed.empty()) {
+                      risk.geometry = std::move(parsed.front());
+                  }
+                  // 风险ID需要参与可见边过滤，不能因几何解析失败而丢失。
+                  refreshed->risks.push_back(std::move(risk));
+              }
+              refreshed->risksLoaded = true;
+          }
+
+          databaseObstacleCache = refreshed;
+          LOG_INFO << "[VisibilityGraph] 数据库障碍物缓存刷新，图版本="
+                   << refreshed->graphVersion
+                   << "，空域=" << refreshed->airSpace.size()
+                   << "，围栏=" << refreshed->fences.size()
+                   << "，风险区=" << refreshed->risks.size();
+          return databaseObstacleCache;
+      }
+
+      void insertDatabaseVisibilityWaypoints(
+          std::vector<std::array<int, 3>>& waypoints,
+          int level,
+          const BaseTile& baseTile,
+          RouteMode mode,
+          int startTime) {
+          if (waypoints.size() < 2) return;
+
+          const auto db = drogon::app().getDbClient("default");
+          if (!db) {
+              LOG_WARN << "[VisibilityGraph] 数据库客户端不可用，保留原始途径点";
               return;
           }
 
-          //增加新表"fence"
+          const BeijingTimeParts time = getBeijingTimeParts(startTime);
+          std::unordered_set<std::string> blockedRiskIds;
+          std::unordered_set<std::string> graphTemporaryFenceIds;
+          std::unordered_set<std::string> blockedTemporaryFenceIds;
+          std::vector<VectorObstacle> obstacles;
+
           try {
-              // 如果你的 fence 表名不一样或者需要加过滤条件（如 active=1），请调整此 SQL
-              auto fenceResult = db->execSqlSync("SELECT id, boundary FROM fence");
-              geos::geom::GeometryFactory::Ptr factory = geos::geom::GeometryFactory::create();
-              geos::io::WKTReader wktReader(factory.get());
-              for (auto row : fenceResult) {
-                  if (row["boundary"].isNull()) continue;
-                  VectorObstacle obs;
-                  obs.id = row["id"].as<std::string>();
-                  std::string boundaryStr = row["boundary"].as<std::string>();
-                  Json::Value boundaryObj;
-                  Json::Reader reader;
-                  // 开始解析 boundary 对象
-                  if (reader.parse(boundaryStr, boundaryObj) && boundaryObj.isObject()) {
+              const bool loadRisks = mode == RouteMode::SAFEST || mode == RouteMode::BALANCED;
+              const auto cached = getDatabaseObstacleCache(db, loadRisks);
+              graphTemporaryFenceIds = cached->graphTemporaryFenceIds;
+              obstacles = cached->airSpace;
 
-                      // 1. 提取高度信息 (代替原来的 alt_min / alt_max)
-                      if (boundaryObj.isMember("altitudeRange") && boundaryObj["altitudeRange"].isArray() && boundaryObj["altitudeRange"].size() == 2) {
-                          obs.alt_min = boundaryObj["altitudeRange"][0].asDouble();
-                          obs.alt_max = boundaryObj["altitudeRange"][1].asDouble();
-                      } else {
-                          continue; // 如果没有高度数据，直接跳过
-                      }
-                      // 2. 提取 shape，兼容数据库内配成字符串 "1" 或是 数字 1
-                      int shape = 1;
-                      if (boundaryObj.isMember("shape")) {
-                          shape = boundaryObj["shape"].isString() ? std::stoi(boundaryObj["shape"].asString()) : boundaryObj["shape"].asInt();
-                      }
-                      // 3. 提取边界点 boundaryData
-                      if (shape == 1 && boundaryObj.isMember("boundaryData") && boundaryObj["boundaryData"].isArray()) {
-                          Json::Value boundaryData = boundaryObj["boundaryData"];
-                          if (boundaryData.size() >= 3) {
-                              std::string wkt = "POLYGON((";
+              for (const auto& fence : cached->fences) {
+                  const bool temporary = graphTemporaryFenceIds.count(fence.id) != 0;
+                  if (temporary && !isTemporaryFenceActive(fence.timeRestrictions, time)) {
+                      continue;
+                  }
+                  if (temporary) blockedTemporaryFenceIds.insert(fence.id);
+                  if (!fence.geometry.vertices.empty()) {
+                      obstacles.push_back(fence.geometry);
+                  }
+              }
 
-                              for (size_t k = 0; k < boundaryData.size(); ++k) {
-                                  // 兼容处理：经纬度可能是带引号的字符串（如"30.536"），也可能是浮点数
-                                  double lon = boundaryData[static_cast<int>(k)]["longitude"].isString() ?
-                                               std::stod(boundaryData[static_cast<int>(k)]["longitude"].asString()) :
-                                               boundaryData[static_cast<int>(k)]["longitude"].asDouble();
-
-                                  double lat = boundaryData[static_cast<int>(k)]["latitude"].isString() ?
-                                               std::stod(boundaryData[static_cast<int>(k)]["latitude"].asString()) :
-                                               boundaryData[static_cast<int>(k)]["latitude"].asDouble();
-                                  obs.vertices.push_back({lon, lat});
-                                  wkt += std::to_string(lon) + " " + std::to_string(lat) + ", ";
-                              }
-                              // WKT 多边形闭合，将终点连回第一个点
-                              double firstLon = boundaryData[0]["longitude"].isString() ?
-                                                std::stod(boundaryData[0]["longitude"].asString()) :
-                                                boundaryData[0]["longitude"].asDouble();
-                              double firstLat = boundaryData[0]["latitude"].isString() ?
-                                                std::stod(boundaryData[0]["latitude"].asString()) :
-                                                boundaryData[0]["latitude"].asDouble();
-                              wkt += std::to_string(firstLon) + " " + std::to_string(firstLat) + "))";
-                              // 生成几何体并合并到总的 obstacles 集合里，供下方的射线探测共用
-                              obs.geom = wktReader.read(wkt);
-                              obstacles.push_back(std::move(obs));
-                          }
+              if (loadRisks) {
+                  for (const auto& risk : cached->risks) {
+                      const int riskLevel = riskLevelAtTime(
+                          risk.emergencyDate,
+                          risk.emergencyLowRiskTime,
+                          risk.emergencyMidRiskTime,
+                          risk.emergencyHighRiskTime,
+                          risk.workdayLowRiskTime,
+                          risk.workdayMidRiskTime,
+                          risk.workdayHighRiskTime,
+                          risk.weekendLowRiskTime,
+                          risk.weekendMidRiskTime,
+                          risk.weekendHighRiskTime,
+                          time);
+                      if (!modeBlocksRisk(mode, riskLevel)) continue;
+                      blockedRiskIds.insert(risk.id);
+                      if (!risk.geometry.vertices.empty()) {
+                          obstacles.push_back(risk.geometry);
                       }
                   }
               }
-          } catch(const std::exception& e) {
-              LOG_ERROR << "无法从数据库获取电子围栏边界信息: " << e.what();
+          } catch (const std::exception& error) {
+              LOG_WARN << "[VisibilityGraph] 障碍物规则读取失败，保留原始途径点: "
+                       << error.what();
+              return;
           }
-          // ================= 新增结束 =================
 
-          // ================= 新增风险区查询 =================
-          if (mode == RouteMode::BALANCED || mode == RouteMode::SAFEST) {
-              try {
-                  auto riskResult = db->execSqlSync(
-                      "SELECT r.*, ST_AsText(a.geom) as geom_wkt FROM risk_area a JOIN risk_area_rule r ON a.type = r.type"
-                  );
-
-                  geos::geom::GeometryFactory::Ptr factory = geos::geom::GeometryFactory::create();
-                  geos::io::WKTReader wktReader(factory.get());
-
-                  // TODO: 请根据您的业务逻辑替换为判断当天是工作日、周末还是节假日的代码
-                  bool isWorkday = true;
-                  bool isWeekend = false;
-                  bool isHoliday = false;
-
-                  for (auto row : riskResult) {
-                      if (row["geom_wkt"].isNull()) continue;
-
-                      bool isHighRisk = false;
-                      bool isLowRisk = false;
-
-                      auto getRuleTime = [&](const std::string& fieldName) {
-                          return row[fieldName].isNull() ? "" : row[fieldName].as<std::string>();
-                      };
-
-                      if (isWorkday) {
-                          isHighRisk = isTimeInRiskRanges(startTime, getRuleTime("workday_high_risk_time"));
-                          isLowRisk = isTimeInRiskRanges(startTime, getRuleTime("workday_low_risk_time"));
-                      } else if (isWeekend) {
-                          isHighRisk = isTimeInRiskRanges(startTime, getRuleTime("weekend_high_risk_time"));
-                          isLowRisk = isTimeInRiskRanges(startTime, getRuleTime("weekend_low_risk_time"));
-                      } else if (isHoliday) {
-                          isHighRisk = isTimeInRiskRanges(startTime, getRuleTime("holiday_high_risk_time"));
-                          isLowRisk = isTimeInRiskRanges(startTime, getRuleTime("holiday_low_risk_time"));
-                      }
-
-                      std::string riskLevelStr = "无风险或中风险";
-                      if (isHighRisk) riskLevelStr = "高风险";
-                      else if (isLowRisk) riskLevelStr = "低风险";
-
-                      bool needBypass = false;
-                      if (mode == RouteMode::BALANCED && isHighRisk) {
-                          needBypass = true;
-                      } else if (mode == RouteMode::SAFEST && (isHighRisk || isLowRisk)) {
-                          needBypass = true;
-                      }
-
-                      if (needBypass) {
-                          std::string typeName = getRuleTime("type");
-                          std::string wktStr = row["geom_wkt"].as<std::string>();
-                          std::unique_ptr<geos::geom::Geometry> geomFull;
-                          try {
-                              geomFull = wktReader.read(wktStr);
-                          } catch(...) {}
-
-                          if (geomFull) {
-                              static int risk_counter = 0;
-                              for (size_t g = 0; g < geomFull->getNumGeometries(); ++g) {
-                                  const geos::geom::Geometry* singleGeo = geomFull->getGeometryN(g);
-                                  if (!singleGeo) continue;
-
-                                  VectorObstacle obs;
-                                  obs.id = "risk_area_" + typeName + "_" + std::to_string(risk_counter++) + "|" + riskLevelStr;
-                                  obs.geom = singleGeo->clone();
-
-                                  auto coords = singleGeo->getCoordinates();
-                                  if (coords) {
-                                      for (size_t i = 0; i < coords->getSize(); ++i) {
-                                          obs.vertices.push_back({coords->getAt(i).x, coords->getAt(i).y});
-                                      }
-                                  }
-                                  obs.alt_min = -1000.0;
-                                  obs.alt_max = 10000.0;
-
-                                  obstacles.push_back(std::move(obs));
-                              }
-                          }
-                      }
-                  }
-              } catch(const std::exception& e) {
-                  LOG_ERROR << "Failed to load risk areas: " << e.what();
+          // 本次请求的障碍集合在所有航段中保持不变。
+          const auto visible = [&obstacles](
+              const VisibilityPoint& from,
+              const VisibilityPoint& to) {
+              if (pointInAnyObstacle2D(from.longitude, from.latitude, obstacles) ||
+                  pointInAnyObstacle2D(to.longitude, to.latitude, obstacles)) {
+                  return false;
               }
+              return !segmentHitsAnyObstacle2D(
+                  from.longitude, from.latitude, to.longitude, to.latitude, obstacles);
+          };
+
+          std::vector<std::array<int, 3>> result;
+          result.push_back(waypoints.front());
+          for (size_t segment = 0; segment + 1 < waypoints.size(); ++segment) {
+              const auto& startGrid = waypoints[segment];
+              const auto& goalGrid = waypoints[segment + 1];
+              const IJH startIjh = {
+                  static_cast<uint32_t>(startGrid[1]),
+                  static_cast<uint32_t>(startGrid[0]),
+                  static_cast<uint32_t>(startGrid[2])};
+              const IJH goalIjh = {
+                  static_cast<uint32_t>(goalGrid[1]),
+                  static_cast<uint32_t>(goalGrid[0]),
+                  static_cast<uint32_t>(goalGrid[2])};
+              const LatLonHei startCoordinate = getLocalTileLatLon(
+                  rchToCode(startIjh, static_cast<uint8_t>(level)), baseTile);
+              const LatLonHei goalCoordinate = getLocalTileLatLon(
+                  rchToCode(goalIjh, static_cast<uint8_t>(level)), baseTile);
+
+              const VisibilityPlanResult plan = VisibilityGraphPlanner::instance().plan(
+                  db,
+                  {startCoordinate.longitude, startCoordinate.latitude},
+                  {goalCoordinate.longitude, goalCoordinate.latitude},
+                  blockedRiskIds,
+                  blockedTemporaryFenceIds,
+                  visible);
+              if (!plan.success) {
+                  LOG_WARN << "[VisibilityGraph] 航段 " << segment
+                           << " 未生成绕行引导，交由原A*处理: " << plan.reason;
+                  result.push_back(goalGrid);
+                  continue;
+              }
+
+              // 可见候选点只有经纬度，沿用当前航段作业层，不查询或写入地形高度。
+              for (size_t index = 1; index + 1 < plan.path.size(); ++index) {
+                  const auto& candidate = plan.path[index];
+                  const IJH candidateIjh = localRowColHeiNumber(
+                      static_cast<uint8_t>(level),
+                      candidate.longitude,
+                      candidate.latitude,
+                      startCoordinate.height,
+                      baseTile);
+                  const std::array<int, 3> candidateGrid = {
+                      static_cast<int>(candidateIjh.column),
+                      static_cast<int>(candidateIjh.row),
+                      startGrid[2]};
+                  if (candidateGrid != result.back() && candidateGrid != goalGrid) {
+                      result.push_back(candidateGrid);
+                  }
+              }
+              result.push_back(goalGrid);
           }
-          // ================= 新增风险区结束 =================
-
-          if (obstacles.empty()) return;
-
-          //TODO:============== 上面障碍物加载（保持原有逻辑不变） ==============
-
-
-          // ============== 2. 算法参数 ==============
-          const int MAX_CANDIDATES_K = 4;        // K-Limiter: 单次最多取 K 个候选
-          const int MAX_OBSTACLE_HITS_M = 100;    // M-Limiter: 同一障碍物碰撞次数上限
-          const double DELTA_DEDUP = 1e-6;       // 容差去重阈值（经纬度度数）
-          // 安全缓冲距离（50m 转经纬度度数的近似值）
-          // 精确值应根据当地纬度计算，这里取平均
-          double buffer_m = 50.0;//缓冲区
-          double lat_deg_m = 111320.0;
-          double avg_lat = (baseTile.south + baseTile.north) / 2.0;
-          double lon_deg_m = 111320.0 * std::cos(avg_lat * M_PI / 180.0);
-          double bufferDegLon = buffer_m / lon_deg_m;
-          double bufferDegLat = buffer_m / lat_deg_m;
-          double bufferDeg = (bufferDegLon + bufferDegLat) / 2.0; // 取平均作为各向同性近似
-          // ============== 3. 逐段执行增量可见性图 A* ==============
-          std::vector<std::array<int, 3>> newWaypoints;
-          newWaypoints.push_back(waypoints[0]);
-          for (size_t seg = 0; seg < waypoints.size() - 1; ++seg) {
-              std::array<int, 3> A_grid = newWaypoints.back();
-              std::array<int, 3> B_grid = waypoints[seg + 1];
-              // 将 A、B 转换为经纬度
-              IJH a_ijh = {(uint32_t)A_grid[1], (uint32_t)A_grid[0], (uint32_t)A_grid[2]};
-              LatLonHei A_ll = getLocalTileLatLon(rchToCode(a_ijh, level), baseTile);
-              IJH b_ijh = {(uint32_t)B_grid[1], (uint32_t)B_grid[0], (uint32_t)B_grid[2]};
-              LatLonHei B_ll = getLocalTileLatLon(rchToCode(b_ijh, level), baseTile);
-              double goalLon = B_ll.longitude, goalLat = B_ll.latitude;
-              // --- A* 数据结构 ---
-              struct VisNode {
-                  double lon, lat;
-                  double g;  // 累积路径代价（经纬度距离）
-                  double f;  // f = g + h
-                  int parentIdx;  // 在 closedList 中的父节点索引，-1 表示起点
-              };
-              auto calcH = [&](double lon, double lat) {
-                  return std::hypot(lon - goalLon, lat - goalLat);
-              };
-              // Open List（按 f 值的小顶堆）
-              auto cmp = [](const VisNode& a, const VisNode& b) { return a.f > b.f; };
-              std::priority_queue<VisNode, std::vector<VisNode>, decltype(cmp)> openList(cmp);
-              std::vector<VisNode> closedList;              // Closed List（同时记录父链）
-              std::unordered_set<size_t> closedHashes;      // 容差去重哈希
-              std::unordered_map<size_t, int> hitCountMap;   // M-Limiter: obstacleIdx → 碰撞次数
-              // 起点入队
-              VisNode startNode{A_ll.longitude, A_ll.latitude, 0.0, calcH(A_ll.longitude, A_ll.latitude), -1};
-              openList.push(startNode);
-              bool found = false;
-              int foundClosedIdx = -1;
-              const int MAX_ITERS = 5000;  // 总迭代上限（安全阀）
-              int iters = 0;
-              int maxHitsReached = 0; // 记录触发 M-Limiter 的次数
-              while (!openList.empty() && iters < MAX_ITERS) {
-                  iters++;
-                  VisNode current = openList.top();
-                  openList.pop();
-                  // 容差去重检查
-                  size_t curHash = std::hash<double>{}(std::round(current.lon * 1e6)) ^
-                                   (std::hash<double>{}(std::round(current.lat * 1e6)) << 1);
-                  if (closedHashes.count(curHash)) continue;
-                  closedHashes.insert(curHash);
-                  int curIdx = (int)closedList.size();
-                  closedList.push_back(current);
-                  // --- 射线探测：current → goal ---
-                  auto hitInfo = raycastObstacles2D(current.lon, current.lat, goalLon, goalLat, obstacles);
-                  if (!hitInfo.has_value()) {
-                      // 无碰撞：current 可直达 goal，记录终点并结束
-                      found = true;
-                      foundClosedIdx = curIdx;
-                      break;
-                  }
-                  // --- 碰撞处理 ---
-                  // M-Limiter 检查
-                  size_t obsIdx = hitInfo->obstacleIdx;
-                  int& hitCount = hitCountMap[obsIdx];
-                  if (hitCount >= MAX_OBSTACLE_HITS_M) {
-                      maxHitsReached++;
-                      continue;  // 该障碍物碰撞次数耗尽，剪枝
-                  }
-                  hitCount++;
-                  // 局部拐点解析
-                  auto candidates = generateLocalCandidates2D(
-                      *hitInfo, current.lon, current.lat, goalLon, goalLat, bufferDeg,
-                      obstacles, closedHashes, MAX_CANDIDATES_K);
-                  for (const auto& [cLon, cLat] : candidates) {
-                      // 局部可见性检测：current → candidate
-                      auto localHit = raycastObstacles2D(current.lon, current.lat, cLon, cLat, obstacles);
-                      if (!localHit.has_value()) {
-                          // 通视，压入 Open List
-                          double newG = current.g + std::hypot(cLon - current.lon, cLat - current.lat);
-                          double newH = calcH(cLon, cLat);
-                          openList.push(VisNode{cLon, cLat, newG, newG + newH, curIdx});
-                      }
-                  }
-              }
-              // --- 回溯路径，插入中间途径点 ---
-              if (found) {
-                  std::vector<std::pair<double, double>> bypassPoints;
-                  int traceIdx = foundClosedIdx;
-                  while (traceIdx >= 0) {
-                      const auto& nd = closedList[traceIdx];
-                      bypassPoints.push_back({nd.lon, nd.lat});
-                      traceIdx = nd.parentIdx;
-                  }
-                  std::reverse(bypassPoints.begin(), bypassPoints.end());
-                  // 跳过第一个（起点 A，已在 newWaypoints 中）和最后一个（会在循环外 push B）
-                  // 只插入中间的绕行拐点
-                  for (size_t k = 1; k < bypassPoints.size(); ++k) {
-                      IJH wp_ijh = localRowColHeiNumber(
-                          static_cast<uint8_t>(level),
-                          bypassPoints[k].first,
-                          bypassPoints[k].second,
-                          A_ll.height,  // 高度层保持不变
-                          baseTile);
-                      std::array<int, 3> wp_grid = {(int)wp_ijh.column, (int)wp_ijh.row, A_grid[2]};
-                      if (wp_grid != newWaypoints.back()) {
-                          newWaypoints.push_back(wp_grid);
-                      }
-                  }
-              } else {
-                  std::string failReason = "未知原因";
-                  if (iters >= MAX_ITERS) {
-                      failReason = "达到全局最大迭代次数 (" + std::to_string(MAX_ITERS) + ") 限制，搜索被强制终止。原因：地图中存在巨量交叠障碍物或局部死胡同导致状态空间爆炸。";
-                  } else if (openList.empty()) {
-                      failReason = "搜索空间耗尽 (OpenList为空)，未找到可行路径。";
-                      if (maxHitsReached > 0) {
-                          failReason += " 期间曾 " + std::to_string(maxHitsReached) + " 次触发单一障碍物碰撞上限(M-Limiter=" + std::to_string(MAX_OBSTACLE_HITS_M) + ")，导致后续探索被剪枝。可能是局部障碍物点数过多或反复陷入同一个复杂多边形内。";
-                      } else {
-                          failReason += " 起点/终点可能被完全包围，或者生成的绕行候选点全被其他障碍物阻挡导致无法继续探索。";
-                      }
-                  }
-                  LOG_WARN << "[VisGraph Bypass] 增量可见性图搜索失败，航段 " << seg
-                           << " 保持原始直连。失败详情: " << failReason;
-              }
-              newWaypoints.push_back(B_grid);
-          }
-          waypoints = newWaypoints;
+          waypoints = std::move(result);
+          LOG_INFO << "[VisibilityGraph] 预处理完成，风险阻挡=" << blockedRiskIds.size()
+                   << "，临时禁飞阻挡=" << blockedTemporaryFenceIds.size()
+                   << "，途径点=" << waypoints.size();
       }
   }
 // === A* 核心逻辑 (简化版 - 无约束条件) ===
@@ -1037,13 +1158,13 @@ Task<AStarResult> aStarPath(
     // [核心修改 1]：动态启发式权重 (Weighted A*)
     // 默认 1.3 用于打破平衡；如果是 safest 模式，大幅提高权重以抵消巨大的 g(n) 惩罚
 
-    double hWeight = 1.2;
+    double hWeight = 1.5;
     if (routeMode == RouteMode::SAFEST) {
-        hWeight = 1.2;
+        hWeight = 1.5;
     } else if (routeMode == RouteMode::BALANCED) {
-        hWeight = 1.2;
+        hWeight = 1.5;
     } else if (routeMode == RouteMode::SHORTEST) {
-        hWeight =1.2;
+        hWeight =1.5;
     }
 
     auto heuristic = [&](int x, int y, int z) {
@@ -1503,15 +1624,11 @@ Task<AStarResult> aStarPath(
         }
         smoothPath.push_back(originalPath.back());
 
-        // [新增] 在抽稀后，复用基于矢量的自动增加绕行途径点逻辑
         std::vector<std::array<int, 3>> tempWaypoints;
         for (const auto& code : smoothPath) {
             IJH p = getLocalTileRHC(code);
             tempWaypoints.push_back({(int)p.column, (int)p.row, (int)p.layer});
         }
-
-    //    insertVectorBypassWaypoints(tempWaypoints, level, baseTile);
-
         vector<string> finalSmoothPath;
         for (const auto& wp : tempWaypoints) {
             IJH p = {(uint32_t)wp[1], (uint32_t)wp[0], (uint32_t)wp[2]};
@@ -1802,12 +1919,10 @@ Task<AStarResult> aStarPath(
         std::shared_ptr<GridEvaluator> gridEvaluator = nullptr;
         if (!isUnconstrained) {
             gridEvaluator = GridEvaluator::create(ruleOptions);
-            // ==========================================
-            // [新增] 执行基于矢量的自动增加绕行途径点
-            // ==========================================
-            LOG_INFO << "[A*] 开始预处理：尝试基于矢量射线拆分绕过障碍物...";
-           insertVectorBypassWaypoints(waypoints, level, baseTile, currentMode, startTime);
         }
+        LOG_INFO << "[A*] 开始数据库可见图绕行预处理";
+        insertDatabaseVisibilityWaypoints(
+            waypoints, level, baseTile, currentMode, startTime);
         int currentSegmentStartTime = startTime;
 
         for (size_t i = 0; i < waypoints.size() - 1 && pathSuccess; ++i) {
