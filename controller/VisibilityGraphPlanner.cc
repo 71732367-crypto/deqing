@@ -284,7 +284,7 @@ VisibilityPlanResult VisibilityGraphPlanner::plan(
         std::vector<double> startDistance(candidateCount, std::numeric_limits<double>::infinity());
         std::vector<double> goalDistance(candidateCount, std::numeric_limits<double>::infinity());
 
-        std::vector<int> stages = {32, 64, 128, candidateCount};
+        std::vector<int> stages = { candidateCount};
         stages.erase(std::unique(stages.begin(), stages.end()), stages.end());
 
         for (int stageSize : stages) {
