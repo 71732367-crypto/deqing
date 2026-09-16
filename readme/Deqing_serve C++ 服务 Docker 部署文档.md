@@ -134,10 +134,6 @@ networks:
       "northwest": { "longitude": 119.843672, "latitude": 30.617562 },
       "northeast": { "longitude": 120.112892, "latitude": 30.617562 },
       "southeast": { "longitude": 120.112892, "latitude": 30.499532 }
-    },
-    "height": {
-      "bottom": 0,
-      "top": 600
     }
   }
 }
