@@ -21,7 +21,6 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
-#include <regex>
 
 
 
@@ -254,27 +253,15 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         std::vector<std::string> chunks;
         std::filesystem::path rootPath(folder);
 
-        // 定义目录名称匹配函数，识别常见的OSGB数据块目录命名模式
-        // 支持的模式: Block_+000_+000, Tile_+000_+000, ATile_+000_+000
-        const auto isValidChunkDir = [](const std::string& dirName) -> bool {
-            // 匹配模式: 前缀(字母或字母组合) + 下划线 + +/-数字 + 下划线 + +/-数字
-            // 例如: Block_+000_+000, Tile_+001_-002, ATile_+011_+004
-            std::regex pattern(R"(^[A-Za-z]+_[+-]\d+_[+-]\d+$)");
-            return std::regex_match(dirName, pattern);
-        };
-
         try {
             bool hasSubDirs = false;
             if (std::filesystem::exists(rootPath) && std::filesystem::is_directory(rootPath)) {
                 for (const auto& entry : std::filesystem::directory_iterator(rootPath)) {
                     if (entry.is_directory()) {
-                        std::string dirName = entry.path().filename().string();
-                        // 检查是否是有效的OSGB数据块目录
-                        if (isValidChunkDir(dirName)) {
-                            chunks.push_back(entry.path().string());
-                            hasSubDirs = true;
-                            LOG_INFO << "识别到有效分块目录: " << dirName;
-                        }
+                        // 不限制分块目录名称
+                        chunks.push_back(entry.path().string());
+                        hasSubDirs = true;
+                        LOG_INFO << "识别到分块目录: " << entry.path().filename().string();
                     }
                 }
             }
@@ -504,12 +491,24 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                                     ", 目标表: " + tableName;
         insertUpdateLog(dbClient, "6", "实景三维数据网格化", completeContent);
 
+        if (totalTrianglesProcessed.load() == 0)
+        {
+            Json::Value err;
+            err["Status"] = "error";
+            err["Message"] = "未识别到有效的 OSGB 模型文件或未提取到三角形面片数据，请检查目录与数据";
+            err["data"]["total_triangles_processed"] = 0;
+            err["data"]["total_grid_count"] = 0;
+            err["data"]["total_discarded_triangles"] = 0;
+            auto resp = HttpResponse::newHttpJsonResponse(err);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+        }
+
         Json::Value res;
         res["status"] = "success";
         res["data"]["total_triangles_processed"] = static_cast<Json::UInt64>(totalTrianglesProcessed.load());
         res["data"]["total_grid_count"] = static_cast<Json::UInt64>(totalGridCount.load());
         res["data"]["total_discarded_triangles"] = static_cast<Json::UInt64>(totalDiscardedTriangles.load());
-        res["data"]["discard_reason"] = "total_discarded_triangles为部分三角形顶点坐标超出了region.json边界或数据异常而被丢弃的数量。";
         res["data"]["message"] = "处理完成，数据已存入数据库";
         // 移除 cells 字段，避免内存溢出
 
