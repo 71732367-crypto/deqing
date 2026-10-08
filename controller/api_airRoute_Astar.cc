@@ -24,9 +24,11 @@
 #include <sstream>
 #include <utility>
 #include <memory>
+#include <limits>
 #include <cstdlib>
 #include <chrono>
 #include <mutex>
+#include <map>
 #include "TIFF.h"
 #include <geos/geom/GeometryFactory.h>
 #include <geos/geom/Geometry.h>
@@ -59,15 +61,6 @@ void initializeAstarConfig() {
 }
 
 // === 辅助函数与结构 ===
-/*
-// 牛顿迭代法求平方根，用于计算欧几里得距离
-static double newton(double num, int iters = 5) {
-    if (num <= 0) return 0.0;
-    double x = num / 2.0;
-    for (int i = 0; i < iters; ++i) x = 0.5 * (x + num / x);
-    return x;
-}
-*/
 
 // 根据层级获取网格大小（单位：米）
     double getGridSize(int level) {
@@ -196,6 +189,31 @@ struct GridCheckAwaiter {
 };
 
   namespace {
+
+      struct RouteWaypoint {
+          std::array<int, 3> grid;
+          bool mustPass = false;
+      };
+
+      struct SegmentCheckResult {
+          bool safe = false;
+          double distance = 0.0;
+          double cost = 0.0;
+          std::string reason;
+      };
+
+      // 每次请求共享原始搜索与抽稀的规则、地形和有向线段校验缓存。
+      struct RouteValidationContext {
+          std::unordered_map<std::string, GridEvaluator::CheckResult> ruleCache;
+          std::unordered_set<std::string> checkedRuleKeys;
+          std::unordered_map<std::string, bool> heightSafeCache;
+          std::unordered_map<std::string, SegmentCheckResult> segmentCache;
+          std::vector<std::array<int, 3>> sphericalMask;
+          int maskLevel = -1;
+          double maskRadius = -1.0;
+          int referenceTime = getBeijingTime();
+      };
+
       struct VectorObstacle {
           std::string id;
           std::vector<std::pair<double, double>> vertices;
@@ -743,11 +761,12 @@ static bool pointInAnyObstacle2D(double lon, double lat,
       }
 
       void insertDatabaseVisibilityWaypoints(
-          std::vector<std::array<int, 3>>& waypoints,
+          std::vector<RouteWaypoint>& waypoints,
           int level,
           const BaseTile& baseTile,
           RouteMode mode,
-          int startTime) {
+          int startTime,
+          std::vector<VectorObstacle>& thinningObstacles) {
           if (waypoints.size() < 2) return;
 
           const auto db = drogon::app().getDbClient("default");
@@ -806,7 +825,8 @@ static bool pointInAnyObstacle2D(double lon, double lat,
               return;
           }
 
-          // 本次请求的障碍集合在所有航段中保持不变。
+          // 本次请求的障碍集合在所有航段和后续抽稀中保持不变。
+          thinningObstacles = obstacles;
           const auto visible = [&obstacles](
               const VisibilityPoint& from,
               const VisibilityPoint& to) {
@@ -818,11 +838,23 @@ static bool pointInAnyObstacle2D(double lon, double lat,
                   from.longitude, from.latitude, to.longitude, to.latitude, obstacles);
           };
 
-          std::vector<std::array<int, 3>> result;
-          result.push_back(waypoints.front());
+          std::vector<RouteWaypoint> result;
+          auto appendWaypoint = [&result](const RouteWaypoint& waypoint) {
+              if (!result.empty() && result.back().grid == waypoint.grid) {
+                  // 同一网格只要有一个是前端点，就必须保留。
+                  result.back().mustPass =
+                      result.back().mustPass || waypoint.mustPass;
+                  return;
+              }
+
+              result.push_back(waypoint);
+          };
+          appendWaypoint(waypoints.front());
           for (size_t segment = 0; segment + 1 < waypoints.size(); ++segment) {
-              const auto& startGrid = waypoints[segment];
-              const auto& goalGrid = waypoints[segment + 1];
+              const auto& startWaypoint = waypoints[segment];
+              const auto& goalWaypoint = waypoints[segment + 1];
+              const auto& startGrid = startWaypoint.grid;
+              const auto& goalGrid = goalWaypoint.grid;
               const IJH startIjh = {
                   static_cast<uint32_t>(startGrid[1]),
                   static_cast<uint32_t>(startGrid[0]),
@@ -846,7 +878,7 @@ static bool pointInAnyObstacle2D(double lon, double lat,
               if (!plan.success) {
                   LOG_WARN << "[VisibilityGraph] 航段 " << segment
                            << " 未生成绕行引导，交由原A*处理: " << plan.reason;
-                  result.push_back(goalGrid);
+                  appendWaypoint(goalWaypoint);
                   continue;
               }
 
@@ -863,11 +895,11 @@ static bool pointInAnyObstacle2D(double lon, double lat,
                       static_cast<int>(candidateIjh.column),
                       static_cast<int>(candidateIjh.row),
                       startGrid[2]};
-                  if (candidateGrid != result.back() && candidateGrid != goalGrid) {
-                      result.push_back(candidateGrid);
+                  if (candidateGrid != goalGrid) {
+                      appendWaypoint(RouteWaypoint{candidateGrid, false});
                   }
               }
-              result.push_back(goalGrid);
+              appendWaypoint(goalWaypoint);
           }
           waypoints = std::move(result);
           LOG_INFO << "[VisibilityGraph] 预处理完成，风险阻挡=" << blockedRiskIds.size()
@@ -875,205 +907,338 @@ static bool pointInAnyObstacle2D(double lon, double lat,
                    << "，途径点=" << waypoints.size();
       }
   }
-// === A* 核心逻辑 (简化版 - 无约束条件) ===
-AStarResult aStarPathSimple(
-    array<int, 3> start,
-    array<int, 3> end,
-    const AStarOptions& options,
-    int level,
-    int workLayer,
-    bool enableTrueHeightCheck
-) {
-    double gridSize;
-    try {
-        gridSize = getGridSize(level);
-    } catch (const exception& e) {
-        return {false, {}, string("不支持的 level: ") + to_string(level)};
-    }
-    // === [新增] 获取全局基础瓦片 ===
-    const BaseTile& baseTile = ::getProjectBaseTile();
-    int sx = start[0], sy = start[1], sz = start[2];
-    int ex = end[0], ey = end[1], ez = end[2];
+namespace {
 
-    if (sx < 0 || sy < 0 ||  ex < 0 || ey < 0 ) {
-        return {false, {}, "行列坐标不能为负数"};
-    }
-    // --- 边界保护：防止 rchToCode 因坐标越界导致内存分配崩溃 ---
-    int gridMax = (1 << level) - 1;
-    if (sx > gridMax || sy > gridMax || ex > gridMax || ey > gridMax) {
-        return {false, {}, "坐标超出网格边界(gridMax=" + std::to_string(gridMax) + ")"};
-    }
-    if (sz < 0 || ez < 0) {
-        return {false, {}, "高度层不能为负数"};
-    }
-    // ----------------------------------------------------------
-    // ==========================================
-    // [新增] 起点/终点 120米真高前置校验
-    // ==========================================
-    auto checkNodeTrueHeight = [&](int x, int y, int z, const string& pointName) -> string {
-        if (!enableTrueHeightCheck) return "";
-        IJH ijh = {(uint32_t)y, (uint32_t)x, (uint32_t)z};
-        string code = rchToCode(ijh, static_cast<uint8_t>(level));
-        LatLonHei boundary = getLocalTileLatLon(code, baseTile);
-        float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
-        float tHeight = boundary.height - ground;
+struct SegmentRequest {
+    std::string from;
+    std::string to;
+    double startTime = 0.0;
+    bool skipBufferRuleCheck = false;
+};
 
-        // 注意：真高计算 (boundary.height - ground) 天然兼容负数海拔(如水下/低洼区)
-        if (tHeight > 120.0f) return pointName + "超出空域限制，超出120米真高适飞空域";
-        if (tHeight < 15.0f) return pointName + "低于15米安全真高，存在撞地危险";
-        return "";
-    };
-
-    string startErr = checkNodeTrueHeight(sx, sy, sz, "起点");
-    if (!startErr.empty()) return {false, {}, startErr};
-
-    string endErr = checkNodeTrueHeight(ex, ey, ez, "终点");
-    if (!endErr.empty()) return {false, {}, endErr};
-    // ==========================================
-    double dx2 = sx - ex, dy2 = sy - ey, dz2 = sz - ez;
-    double lineLength = std::sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
-    // 定义 A* 算法的启发式函数 (使用原生 std::sqrt 并加入 Tie-Breaker)
-    auto heuristic = [&](int x, int y, int z) {
-        double dx = x - ex, dy = y - ey, dz = z - ez;
-        // 使用 std::sqrt 保证精度，乘以 1.3 的权重打破平衡，防止 A* 在空旷区盲目扩散
-        return std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize * 1.3;
-    };
-    // A*节点结构
-    struct Node {
-        int x, y, z;
-        double g, h, f;
-        GridKey key;
-
-
-
-        Node() = default;
-        Node(int x_, int y_, int z_, double g_, double h_, size_t s_)
-            : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), key({x_, y_, z_}) {}
-
-        bool operator>(const Node& o) const {
-            return f > o.f; // 只需要比较 f 值，性能更好
-        }
-    };
-
-    static size_t globalSeqSimple = 0;
-    GridKey startKey = {sx, sy, sz}; // 起点无方向
-
-    priority_queue<Node, vector<Node>, greater<Node>> openSet;
-    std::unordered_map<GridKey, Node, GridKeyHash> openMap;
-    std::unordered_set<GridKey, GridKeyHash> closedSet;
-    std::unordered_map<GridKey, GridKey, GridKeyHash> parent;
-
-    double h0 = heuristic(sx, sy, sz);
-    Node startNode(sx, sy, sz, 0.0, h0, globalSeqSimple++);
-    openSet.push(startNode);
-    openMap[startKey] = startNode;
-
-    int searchSteps = 0;
-    const int MAX_SEARCH_STEPS = g_maxSearchSteps;
-    uint64_t maxCoord = (1ULL << (3 * level));
-    string failReason = "未找到路径"; // [新增] 追踪失败原因
-    while (!openSet.empty()) {
-        if (++searchSteps > MAX_SEARCH_STEPS) {
-            return {false, {}, "路径计算超时: 搜索范围过大"};
-        }
-
-        Node cur = openSet.top();
-        openSet.pop();
-
-        if (closedSet.count(cur.key)) continue;
-
-        auto it = openMap.find(cur.key);
-        if (it == openMap.end() || abs(it->second.g - cur.g) > 1e-6) continue;
-
-        // 到达终点判定：通过坐标对比，不对比方向
-        if (cur.x == ex && cur.y == ey && cur.z == ez) {
-            vector<string> path;
-            GridKey currKey = cur.key;
-
-            IJH lastIJH = {(uint32_t)currKey.y, (uint32_t)currKey.x, (uint32_t)currKey.z};
-            path.push_back(rchToCode(lastIJH, static_cast<uint8_t>(level)));
-
-            while (parent.count(currKey)) {
-                currKey = parent[currKey];
-                IJH ijh = {(uint32_t)currKey.y, (uint32_t)currKey.x, (uint32_t)currKey.z};
-                path.push_back(rchToCode(ijh, static_cast<uint8_t>(level)));
-            }
-            reverse(path.begin(), path.end());
-            return {true, path, ""};
-        }
-
-        closedSet.insert(cur.key);
-        openMap.erase(cur.key);
-
-        // 扩展 26 个邻居
-        for (size_t i = 0; i < DIRECTIONS.size(); ++i) {
-            const auto& d = DIRECTIONS[i];
-            int nx = cur.x + d[0];
-            int ny = cur.y + d[1];
-            int nz = cur.z + d[2];
-
-            if (nx < 0 || ny < 0 || nz < 0) continue;
-            if (static_cast<uint64_t>(nx) >= maxCoord ||
-                static_cast<uint64_t>(ny) >= maxCoord ||
-                static_cast<uint64_t>(nz) >= maxCoord) continue;
-
-            GridKey nKey = {nx, ny, nz};
-            if (closedSet.count(nKey)) continue;
-            // ==========================================
-            // [新增] 简化版的物理真高安全限制
-            // ==========================================
-            IJH nextIJH = {(uint32_t)ny, (uint32_t)nx, (uint32_t)nz};
-            string code = rchToCode(nextIJH, static_cast<uint8_t>(level));
-            LatLonHei boundary = getLocalTileLatLon(code, baseTile);
-
-            if (enableTrueHeightCheck) {
-                float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
-                float trueHeight = boundary.height - groundElevation;
-
-                if (trueHeight > 120.0f) {
-                    failReason = "超出空域限制，超出120米真高适飞空域";
-                    continue;
-                }
-                if (trueHeight < 15.0f) {
-                    failReason = "低于15米安全真高，存在撞地危险";
-                    continue;
-                }
-            }
-            // ==========================================
-
-            double moveDist = DIRECTION_DISTANCES[i] * gridSize;
-
-
-
-            double newG = cur.g + moveDist ;
-
-            auto existing = openMap.find(nKey);
-            if (existing != openMap.end() && newG >= existing->second.g) continue;
-
-            double newH = heuristic(nx, ny, nz);
-            Node next(nx, ny, nz, newG, newH, globalSeqSimple++);
-            openSet.push(next);
-            openMap[nKey] = next;
-            parent[nKey] = cur.key;
-        }
-    }
-
-    return {false, {}, "未找到路径"};
+double gridDistanceMeters(const std::string& fromCode, const std::string& toCode, int level) {
+    const IJH from = getLocalTileRHC(fromCode);
+    const IJH to = getLocalTileRHC(toCode);
+    const double dx = static_cast<double>(to.column) - from.column;
+    const double dy = static_cast<double>(to.row) - from.row;
+    const double dz = static_cast<double>(to.layer) - from.layer;
+    return std::sqrt(dx * dx + dy * dy + dz * dz) * getGridSize(level);
 }
+
+std::string routeRuleKey(const std::string& code, int time) {
+    return code + "|" + std::to_string(time);
+}
+
+std::string routeSegmentKey(const SegmentRequest& segment) {
+    // 时间相关校验有方向；保留亚秒起始时间，不能复用反向线段结果。
+    std::ostringstream key;
+    key << segment.from << ">" << segment.to << "|"
+        << std::setprecision(17) << segment.startTime << "|"
+        << (segment.skipBufferRuleCheck ? "skip-buffer" : "full-buffer");
+    return key.str();
+}
+
+bool routeHeightSafe(const std::string& code, const BaseTile& baseTile,
+                     RouteValidationContext& context) {
+    const auto cached = context.heightSafeCache.find(code);
+    if (cached != context.heightSafeCache.end()) return cached->second;
+    const LatLonHei point = getLocalTileLatLon(code, baseTile);
+    const double ground = TiffReader::getInstance().getElevation(point.longitude, point.latitude);
+    // 保留无地形数据时的降级行为，不把无效高程当作零海拔。
+    const bool unavailable = !std::isfinite(ground) || ground == TiffReader::INVALID_ELEVATION;
+    const double height = point.height - ground;
+    const bool safe = unavailable || (std::isfinite(height) && height >= 15.0 && height <= 120.0);
+    context.heightSafeCache.emplace(code, safe);
+    return safe;
+}
+
+double routePenalty(
+    const GridEvaluator::CheckResult& result,
+    const RouteWeights& weights) {
+    return weights.comm * result.commCost +
+           weights.nav * result.navCost +
+           weights.surv * result.survCost +
+           weights.wind * result.windCost +
+           weights.rain * result.rainCost +
+           weights.vis * result.visCost +
+           weights.temp * result.tempCost +
+           weights.hum * result.humCost +
+           weights.press * result.pressCost +
+           weights.em * result.emCost +
+           weights.riskArea * result.riskCost +
+           weights.privacy * result.privacyCost;
+}
+
+void ensureSphericalMask(
+    RouteValidationContext& context,
+    uint8_t level,
+    double planeRadius) {
+    if (context.maskLevel == level &&
+        std::abs(context.maskRadius - planeRadius) < 1e-9 &&
+        !context.sphericalMask.empty()) {
+        return;
+    }
+
+    context.sphericalMask.clear();
+    context.maskLevel = level;
+    context.maskRadius = planeRadius;
+
+    const double gridSize = getGridSize(level);
+    if (planeRadius > 0.0) {
+        const int extendCell = static_cast<int>(std::ceil(planeRadius / gridSize));
+        for (int dx = -extendCell; dx <= extendCell; ++dx) {
+            for (int dy = -extendCell; dy <= extendCell; ++dy) {
+                for (int dz = -extendCell; dz <= extendCell; ++dz) {
+                    const double distance =
+                        std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
+                    if (distance <= planeRadius) {
+                        context.sphericalMask.push_back({dx, dy, dz});
+                    }
+                }
+            }
+        }
+    }
+
+    if (context.sphericalMask.empty()) {
+        context.sphericalMask.push_back({0, 0, 0});
+    }
+
+    // 与普通A*保持一致：设置半径时至少扩展一格缓冲区。
+    if (planeRadius > 0.0 && context.sphericalMask.size() == 1) {
+        context.sphericalMask.clear();
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    context.sphericalMask.push_back({dx, dy, dz});
+                }
+            }
+        }
+    }
+}
+
+
+struct PreparedSegment {
+    SegmentRequest request;
+    SegmentCheckResult result;
+    std::vector<std::string> ruleKeys;
+    std::vector<std::pair<std::string, double>> costSamples;
+};
+
+/// 网格中心连线在指定网格内的参数区间，用于实际经过时间和距离积分。
+std::pair<double, double> cellParameterInterval(
+    const IJH& from, const IJH& to, const IJH& cell) {
+    const std::array<double, 3> a{
+        static_cast<double>(from.column), static_cast<double>(from.row), static_cast<double>(from.layer)};
+    const std::array<double, 3> b{
+        static_cast<double>(to.column), static_cast<double>(to.row), static_cast<double>(to.layer)};
+    const std::array<double, 3> c{
+        static_cast<double>(cell.column), static_cast<double>(cell.row), static_cast<double>(cell.layer)};
+    double enter = 0.0;
+    double leave = 1.0;
+    for (size_t axis = 0; axis < 3; ++axis) {
+        const double delta = b[axis] - a[axis];
+        if (delta == 0.0) {
+            if (std::abs(a[axis] - c[axis]) > 0.5) return {1.0, 0.0};
+            continue;
+        }
+        double low = (c[axis] - 0.5 - a[axis]) / delta;
+        double high = (c[axis] + 0.5 - a[axis]) / delta;
+        if (low > high) std::swap(low, high);
+        enter = std::max(enter, low);
+        leave = std::min(leave, high);
+    }
+    return {enter, leave};
+}
+
+/// A* 扩展和抽稀共用：线段障碍、中心真高、扫过缓冲区及逐秒规则。
+Task<std::vector<SegmentCheckResult>> checkRouteSegments(
+    const std::vector<SegmentRequest>& requests,
+    const std::shared_ptr<GridEvaluator>& evaluator,
+    uint8_t level,
+    double planeRadius,
+    double speed,
+    bool enableTrueHeightCheck,
+    RouteMode mode,
+    const std::vector<VectorObstacle>& obstacles,
+    RouteValidationContext& context) {
+    const BaseTile& baseTile = ::getProjectBaseTile();
+    ensureSphericalMask(context, level, planeRadius);
+    // 长距离搜索只限制校验缓存，不丢弃搜索节点或改变通行结论。
+    if (context.checkedRuleKeys.size() > 100000) {
+        context.checkedRuleKeys.clear();
+        context.ruleCache.clear();
+    }
+    if (context.segmentCache.size() > 20000) context.segmentCache.clear();
+    const RouteWeights weights = getWeightsByMode(evaluator ? mode : RouteMode::ORIGINAL);
+    // GridEvaluator 的返回键只有 code，因此不同时间必须分批，不能互相覆盖。
+    std::map<int, std::unordered_map<std::string, CandidateInfo>> pending;
+    std::vector<PreparedSegment> prepared;
+    prepared.reserve(requests.size());
+
+    for (const auto& request : requests) {
+        PreparedSegment segment;
+        segment.request = request;
+        const auto cached = context.segmentCache.find(routeSegmentKey(request));
+        if (cached != context.segmentCache.end()) {
+            segment.result = cached->second;
+            prepared.push_back(std::move(segment));
+            continue;
+        }
+        const LatLonHei from = getLocalTileLatLon(request.from, baseTile);
+        const LatLonHei to = getLocalTileLatLon(request.to, baseTile);
+        if (pointInAnyObstacle2D(from.longitude, from.latitude, obstacles) ||
+            pointInAnyObstacle2D(to.longitude, to.latitude, obstacles) ||
+            segmentHitsAnyObstacle2D(from.longitude, from.latitude, to.longitude, to.latitude, obstacles)) {
+            segment.result.reason = "矢量障碍物阻挡线段";
+            prepared.push_back(std::move(segment));
+            continue;
+        }
+        segment.result.distance = gridDistanceMeters(request.from, request.to, level);
+        const double duration = segment.result.distance / speed;
+        if (!std::isfinite(request.startTime) || !std::isfinite(duration) || duration < 0.0 ||
+            request.startTime < std::numeric_limits<int>::min() ||
+            request.startTime + duration >= std::numeric_limits<int>::max()) {
+            segment.result.reason = "航段时间超出规则支持范围";
+            prepared.push_back(std::move(segment));
+            continue;
+        }
+        const IJH fromGrid = getLocalTileRHC(request.from);
+        const IJH toGrid = getLocalTileRHC(request.to);
+        const auto cells = singleLineToGrids2({
+            {from.longitude, from.latitude, from.height},
+            {to.longitude, to.latitude, to.height}}, level, baseTile);
+        if (cells.empty() || cells.front() != request.from || cells.back() != request.to) {
+            segment.result.reason = "线段网格化未覆盖起终点";
+            prepared.push_back(std::move(segment));
+            continue;
+        }
+        segment.result.safe = true;
+        for (const auto& code : cells) {
+            const IJH center = getLocalTileRHC(code);
+            const auto [enter, leave] = cellParameterInterval(fromGrid, toGrid, center);
+            if (enter > leave + 1e-9) {
+                segment.result.safe = false;
+                segment.result.reason = "线段网格化产生不相交网格: " + code;
+                break;
+            }
+            // 真高限制针对航迹中心；缓冲区仅参与障碍和规则检查，二者不混用。
+            if (enableTrueHeightCheck && !routeHeightSafe(code, baseTile, context)) {
+                segment.result.safe = false;
+                segment.result.reason = "真高不在15至120米范围: " + code;
+                break;
+            }
+            if (!evaluator) continue;
+            const double enterTime = request.startTime + enter * duration;
+            const double leaveTime = request.startTime + std::max(enter, leave) * duration;
+            const int firstSecond = static_cast<int>(std::floor(enterTime));
+            const int lastSecond = static_cast<int>(std::floor(leaveTime));
+            // 在规则的秒精度内覆盖整个占用区间，防止长快捷线跨过时段边界。
+            for (int second = firstSecond; second <= lastSecond; ++second) {
+                const auto normalized = normalizeGridTime(second, context.referenceTime);
+                for (const auto& offset : context.sphericalMask) {
+                    const int64_t x = static_cast<int64_t>(center.column) + offset[0];
+                    const int64_t y = static_cast<int64_t>(center.row) + offset[1];
+                    const int64_t z = static_cast<int64_t>(center.layer) + offset[2];
+                    // 沿用既有负坐标裁剪语义，避免生成无效编码。
+                    if (x < 0 || y < 0 || z < 0) continue;
+                    const uint64_t maxCoord = level >= 21
+                        ? std::numeric_limits<uint64_t>::max() : (1ull << (3u * level));
+                    if (static_cast<uint64_t>(x) >= maxCoord ||
+                        static_cast<uint64_t>(y) >= maxCoord ||
+                        static_cast<uint64_t>(z) >= maxCoord) continue;
+                    const std::string expanded = rchToCode(
+                        {static_cast<uint32_t>(y), static_cast<uint32_t>(x), static_cast<uint32_t>(z)}, level);
+                    const std::string key = routeRuleKey(expanded, second);
+                    segment.ruleKeys.push_back(key);
+                    if (context.checkedRuleKeys.count(key) == 0) {
+                        pending[second].emplace(expanded, CandidateInfo{
+                            expanded, second, normalized.wdTime, normalized.wdRule, true});
+                    }
+                }
+                // 软代价按中心航迹在当前秒内的距离积分，不参与硬性禁行判定。
+                const double secondsInCell = std::max(0.0,
+                    std::min(leaveTime, static_cast<double>(second) + 1.0) -
+                    std::max(enterTime, static_cast<double>(second)));
+                segment.costSamples.emplace_back(routeRuleKey(code, second), secondsInCell * speed);
+            }
+        }
+        segment.result.cost = segment.result.distance *
+            (weights.distance + (fromGrid.layer != toGrid.layer ? weights.efficiency : 0.0));
+        prepared.push_back(std::move(segment));
+    }
+
+    constexpr size_t batchSize = 2048;
+    for (const auto& [second, byCode] : pending) {
+        std::vector<CandidateInfo> batch;
+        batch.reserve(std::min(batchSize, byCode.size()));
+        auto flush = [&]() -> Task<void> {
+            const auto results = co_await GridCheckAwaiter{evaluator, batch};
+            for (const auto& candidate : batch) {
+                const std::string key = routeRuleKey(candidate.code, second);
+                context.checkedRuleKeys.insert(key);
+                if (results) {
+                    const auto found = results->find(candidate.code);
+                    if (found != results->end()) context.ruleCache[key] = found->second;
+                }
+            }
+            batch.clear();
+            co_return;
+        };
+        for (const auto& [code, candidate] : byCode) {
+            batch.push_back(candidate);
+            if (batch.size() == batchSize) co_await flush();
+        }
+        if (!batch.empty()) co_await flush();
+    }
+
+    std::vector<SegmentCheckResult> results;
+    results.reserve(prepared.size());
+    for (auto& segment : prepared) {
+        if (segment.result.safe && !segment.request.skipBufferRuleCheck) {
+            for (const auto& key : segment.ruleKeys) {
+                const auto rule = context.ruleCache.find(key);
+                if (rule == context.ruleCache.end() || !rule->second.pass) {
+                    segment.result.safe = false;
+                    segment.result.reason = rule == context.ruleCache.end()
+                        ? "规则检查缺少结果: " + key
+                        : "规则禁止通行: " + key + " " + rule->second.reason;
+                    break;
+                }
+            }
+        }
+        if (segment.result.safe) {
+            for (const auto& [key, length] : segment.costSamples) {
+                const auto rule = context.ruleCache.find(key);
+                if (rule == context.ruleCache.end()) {
+                    segment.result.safe = false;
+                    segment.result.reason = "规则检查缺少结果: " + key;
+                    break;
+                }
+                segment.result.cost += length * routePenalty(rule->second, weights);
+            }
+        }
+        context.segmentCache[routeSegmentKey(segment.request)] = segment.result;
+        results.push_back(segment.result);
+    }
+    co_return results;
+}
+
+}  // namespace
 // === A* 核心逻辑 (协程版 - 有约束条件) ===
 Task<AStarResult> aStarPath(
     array<int, 3> start,
     array<int, 3> end,
-    int startTime,
+    double startTime,
     double planeRadius,
     const AStarOptions& options,
     int level,
     std::shared_ptr<GridEvaluator> evaluator,
     int workLayer,
     RouteMode routeMode,
-    bool enableTrueHeightCheck
+    bool enableTrueHeightCheck,
+    const std::vector<VectorObstacle>& obstacles,
+    RouteValidationContext& validation
 ) {
-    int currentTime = getBeijingTime();
     // === [新增] 获取全局基础瓦片，用于后续的网格与经纬度转换 ===
     const BaseTile& baseTile = ::getProjectBaseTile();
     double gridSize;
@@ -1100,53 +1265,19 @@ Task<AStarResult> aStarPath(
     }
     // ----------------------------------------------------------
 
-    RouteWeights weights = getWeightsByMode(routeMode);
+    RouteWeights weights = getWeightsByMode(evaluator ? routeMode : RouteMode::ORIGINAL);
 
     IJH startIJH = {(uint32_t)sy, (uint32_t)sx, (uint32_t)sz};
     std::string startCode = rchToCode(startIJH, static_cast<uint8_t>(level));
     IJH endIJH = {(uint32_t)ey, (uint32_t)ex, (uint32_t)ez};
     std::string endCode = rchToCode(endIJH, static_cast<uint8_t>(level));
 
-    // ==========================================
-    // 1. 起点/终点 基础有效性检查
-    // ==========================================
-    {
-        // [新增] 独立真高校验，防止起终点直接违规
-        auto checkNodeTrueHeight = [&](const string& code, const string& pointName) -> string {
-            if (!enableTrueHeightCheck) return "";
-            LatLonHei boundary = getLocalTileLatLon(code, baseTile);
-            float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
-            float tHeight = boundary.height - ground;
-            if (tHeight > 120.0f) return pointName + "超出空域限制，超出120米真高适飞空域";
-            if (tHeight < 15.0f) return pointName + "低于15米安全真高，存在撞地危险";
-            return "";
-        };
-
-        string startHeightErr = checkNodeTrueHeight(startCode, "起点");
-        if (!startHeightErr.empty()) co_return {false, {}, startHeightErr};
-
-        string endHeightErr = checkNodeTrueHeight(endCode, "终点");
-        if (!endHeightErr.empty()) co_return {false, {}, endHeightErr};
-        auto startNorm = normalizeGridTime(startTime, currentTime);
-        CandidateInfo startCand = { startCode, startTime, startNorm.wdTime, startNorm.wdRule, true };
-        CandidateInfo endCand = { endCode, 0, 0, "", false };
-
-        std::vector<CandidateInfo> preCheckCands = {startCand, endCand};
-        auto preCheckResultsPtr = co_await GridCheckAwaiter{evaluator, preCheckCands};
-
-        if (preCheckResultsPtr->count(startCode)) {
-            const auto& res = preCheckResultsPtr->at(startCode);
-            if (!res.pass) {
-                co_return {false, {}, "起点不可通行: " + res.reason};
-            }
-        }
-
-        if (preCheckResultsPtr->count(endCode)) {
-            const auto& res = preCheckResultsPtr->at(endCode);
-            if (!res.pass) {
-                co_return {false, {}, "终点不可通行: " + res.reason};
-            }
-        }
+    // 保持原分支语义：起点只做真高校验，首轮扩展不做球形缓冲区硬拦截。
+    if (enableTrueHeightCheck && !routeHeightSafe(startCode, baseTile, validation)) {
+        co_return AStarResult{false, {}, "起点真高不在15至120米范围"};
+    }
+    if (enableTrueHeightCheck && !routeHeightSafe(endCode, baseTile, validation)) {
+        co_return AStarResult{false, {}, "终点真高不在15至120米范围"};
     }
 
     // ==========================================
@@ -1158,12 +1289,12 @@ Task<AStarResult> aStarPath(
     // [核心修改 1]：动态启发式权重 (Weighted A*)
     // 默认 1.3 用于打破平衡；如果是 safest 模式，大幅提高权重以抵消巨大的 g(n) 惩罚
 
-    double hWeight = 1.5;
-    if (routeMode == RouteMode::SAFEST) {
+    double hWeight = evaluator ? 1.5 : 1.3;
+    if (evaluator && routeMode == RouteMode::SAFEST) {
         hWeight = 1.5;
-    } else if (routeMode == RouteMode::BALANCED) {
+    } else if (evaluator && routeMode == RouteMode::BALANCED) {
         hWeight = 1.5;
-    } else if (routeMode == RouteMode::SHORTEST) {
+    } else if (evaluator && routeMode == RouteMode::SHORTEST) {
         hWeight =1.5;
     }
 
@@ -1175,54 +1306,19 @@ Task<AStarResult> aStarPath(
     struct Node {
         int x, y, z;
         double g, h, f;
-        int arrivalTime;
+        double arrivalTime;
         GridKey key;
 
 
 
         Node() = default;
-        Node(int x_, int y_, int z_, double g_, double h_, int at_)
+        Node(int x_, int y_, int z_, double g_, double h_, double at_)
             : x(x_), y(y_), z(z_), g(g_), h(h_), f(g_+h_), arrivalTime(at_), key({x_, y_, z_}) {}
 
         bool operator>(const Node& o) const {
             return f > o.f; // 只需要比较 f 值，性能更好
         }
     };
-//==================================================================================
-      //球行包围避障逻辑计算
-//==================================================================================
-      std::vector<std::array<int,3>>sphericalMask;
-      int exendCell=0;
-      if (planeRadius>0) {
-          exendCell =std::ceil(planeRadius/gridSize);
-          for (int dx =-exendCell; dx <= exendCell; ++dx) {
-              for (int dy =-exendCell; dy <= exendCell; ++dy) {
-                  for (int dz = -exendCell; dz <= exendCell; ++dz) {
-                      double dist=std::sqrt(dx*dx+dy*dy+dz*dz)*gridSize;
-                      if (dist<=planeRadius) {
-                          sphericalMask.push_back({dx,dy,dz});
-                      }
-                  }
-              }
-          }
-      }
-      if (sphericalMask.empty()) {
-          sphericalMask.push_back({0, 0, 0});
-      }
-      //最少一格缓冲区
-      if (planeRadius > 0 && sphericalMask.size() == 1) {
-          sphericalMask.clear(); // 清空原本只有 {0,0,0} 的数组
-          for (int dx = -1; dx <= 1; ++dx) {
-              for (int dy = -1; dy <= 1; ++dy) {
-                  for (int dz = -1; dz <= 1; ++dz) {
-                      sphericalMask.push_back({dx, dy, dz});
-                  }
-              }
-          }
-      }
-
-
-
     priority_queue<Node, vector<Node>, greater<Node>> openSet;
     std::unordered_map<GridKey, Node, GridKeyHash> openMap;
     std::unordered_set<GridKey, GridKeyHash> closedSet;
@@ -1272,179 +1368,55 @@ Task<AStarResult> aStarPath(
         closedSet.insert(cur.key);
         openMap.erase(cur.key);
 
-        struct NeighborMeta { int x, y, z; string code; double moveCost; int arrival; };
-        vector<NeighborMeta> validNeighbors;
-        vector<CandidateInfo> candidateListForChecker;
-        validNeighbors.reserve(26);
-        candidateListForChecker.reserve(26);
-
-        uint64_t maxCoord = (1ULL << (3 * level));
-        std::unordered_set<std::string> addedCodes;
-        // 遍历 26 个方向
-        for (size_t i = 0; i < DIRECTIONS.size(); ++i) {
-            const auto& d = DIRECTIONS[i];
-            int nx = cur.x + d[0];
-            int ny = cur.y + d[1];
-            int nz = cur.z + d[2];
-
+        struct NeighborMeta {
+            int x, y, z;
+            std::string code;
+        };
+        std::vector<NeighborMeta> neighbors;
+        std::vector<SegmentRequest> requests;
+        neighbors.reserve(26);
+        requests.reserve(26);
+        const std::string currentCode = rchToCode(
+            {static_cast<uint32_t>(cur.y), static_cast<uint32_t>(cur.x),
+             static_cast<uint32_t>(cur.z)}, static_cast<uint8_t>(level));
+        const uint64_t maxCoord = level >= 21
+            ? std::numeric_limits<uint64_t>::max() : (1ull << (3u * level));
+        for (const auto& direction : DIRECTIONS) {
+            const int nx = cur.x + direction[0];
+            const int ny = cur.y + direction[1];
+            const int nz = cur.z + direction[2];
             if (nx < 0 || ny < 0 || nz < 0) continue;
             if (static_cast<uint64_t>(nx) >= maxCoord ||
                 static_cast<uint64_t>(ny) >= maxCoord ||
                 static_cast<uint64_t>(nz) >= maxCoord) continue;
-            GridKey nKey = {nx, ny, nz};
-            if (closedSet.count(nKey)) continue;
-
-            double moveDist = DIRECTION_DISTANCES[i] * gridSize;
-            int stepTime = static_cast<int>(moveDist / options.speed);
-            int arrival = cur.arrivalTime + stepTime;
-
-            auto norm = normalizeGridTime(arrival, currentTime);
-            IJH nextIJH = {(uint32_t)ny, (uint32_t)nx, (uint32_t)nz};
-            string code = rchToCode(nextIJH, static_cast<uint8_t>(level));
-
-            // ==========================================
-            // [新增] 120米适飞区与防撞地真高校验
-            // ==========================================
-
-            // 1. 将邻居网格编码转换为实际的经纬度和绝对高度
-            LatLonHei boundary = getLocalTileLatLon(code, baseTile);
-
-            if (enableTrueHeightCheck) {
-                // 2. 从 TiffReader 获取此经纬度下的真实地面高程
-                float groundElevation = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
-
-                // 3. 计算相对高差(真高)。
-                // 算法天然兼容负数高程（如水下测绘或低洼盆地），
-                // 假设无人机网格绝对高度 20m，地面海拔 -50m，真高为 20 - (-50) = 70m。
-                float trueHeight = boundary.height - groundElevation;
-                // 4. 适飞区判定限制：最高 120 米，最低安全距离 5 米
-                float maxFlyableTrueHeight = 120.0f;
-                float minSafeTrueHeight = 15.0f;
-
-                if (trueHeight > maxFlyableTrueHeight) {
-                    lastFailReason = "路径受阻: 前方超出空域限制，超出120米真高适飞空域";
-                    continue;
-                }
-                if (trueHeight < minSafeTrueHeight) {
-                    lastFailReason = "路径受阻: 前方低于15米安全真高，存在撞地危险";
-                    continue;
-                }
+            if (closedSet.count({nx, ny, nz})) continue;
+            const std::string code = rchToCode(
+                {static_cast<uint32_t>(ny), static_cast<uint32_t>(nx),
+                 static_cast<uint32_t>(nz)}, static_cast<uint8_t>(level));
+            neighbors.push_back({nx, ny, nz, code});
+            requests.push_back({
+                currentCode, code, cur.arrivalTime,
+                cur.key == startKey});
+        }
+        const auto checks = co_await checkRouteSegments(
+            requests, evaluator, static_cast<uint8_t>(level), planeRadius,
+            options.speed, enableTrueHeightCheck, routeMode, obstacles, validation);
+        for (size_t index = 0; index < neighbors.size(); ++index) {
+            const auto& check = checks[index];
+            if (!check.safe) {
+                lastFailReason = check.reason;
+                continue;
             }
-            // ==========================================
-            validNeighbors.push_back({nx, ny, nz, code, moveDist, arrival});
-
-
-
-
-
-            // ==========================================
-            // [修改] 叠加球形 Mask：将无人机占据的所有网格送入 Redis 检查
-            // ==========================================
-            for (const auto& offset: sphericalMask) {
-                int mx=nx+offset[0];
-                int my=ny+offset[1];
-                int mz=nz+offset[2];
-                if (mx<0||my<0||mz<0) continue;
-                if (static_cast<uint64_t>(mx) >= maxCoord ||
-                    static_cast<uint64_t>(my) >= maxCoord ||
-                    static_cast<uint64_t>(mz) >= maxCoord) continue;
-                IJH maskIJH = {(uint32_t)my, (uint32_t)mx, (uint32_t)mz};
-                std::string maskCode = rchToCode(maskIJH, static_cast<uint8_t>(level));
-
-                if (addedCodes.find(maskCode) == addedCodes.end()) {
-                    addedCodes.insert(maskCode);
-                    candidateListForChecker.push_back({maskCode, arrival, norm.wdTime, norm.wdRule, true});
-                }
-            }
-        }
-
-        std::shared_ptr<std::unordered_map<string, GridEvaluator::CheckResult>> checkResultsPtr;
-        if (!candidateListForChecker.empty()) {
-            checkResultsPtr = co_await GridCheckAwaiter{evaluator, candidateListForChecker};
-        }
-
-        // 邻居缓冲区检查：包围球有一个网格碰撞整个节点就丢弃
-        bool allNeighborsPassable = true;
-        bool skipNeighborBufferCheck = (cur.key == startKey);
-
-        std::vector<NeighborMeta>passedNeighbors;
-
-       if (!skipNeighborBufferCheck) {
-           for (const auto& nb:validNeighbors) {
-               bool neighborIsSafe = true;
-               for (const auto&offset: sphericalMask) {
-                   int mx = nb.x+offset[0],my = nb.y+offset[1],mz = nb.z+offset[2];
-                   if (mx < 0 || my < 0 || mz < 0 || mx >= maxCoord || my >= maxCoord || mz >= maxCoord) continue;
-                   IJH mIJH = {(uint32_t)my, (uint32_t)mx, (uint32_t)mz};
-                   std::string mCode = rchToCode(mIJH, static_cast<uint8_t>(level));
-                   if (checkResultsPtr && checkResultsPtr->count(mCode)) {
-                       if (!checkResultsPtr->at(mCode).pass) {
-                           neighborIsSafe = false;
-                           lastFailReason = "碰撞: 网格 " + mCode;
-                           break;
-                       }
-                   }else {
-                       neighborIsSafe = false; // 无数据也视为不安全
-                       break;
-                   }
-               }
-               if (neighborIsSafe) {
-                   passedNeighbors.push_back(nb); // 该邻居整体安全，允许飞行
-               }
-           }
-
-       } else {
-           passedNeighbors = validNeighbors; // 起点不校验
-       }
-        if (passedNeighbors.empty()) {
-            continue; // 所有邻居都撞了，才会抛弃当前扩展
-        }
-
-        // ==========================================
-        // 计算邻居节点的累积代价值 (融合转向惩罚)
-        // ==========================================
-        for (const auto& nb : passedNeighbors) {
-            // 【新增】防御性编程：防止起点周围的网格因缺失数据导致 at() 抛出异常崩溃
-            if (!checkResultsPtr || !checkResultsPtr->count(nb.code)) continue;
-            const auto& res = checkResultsPtr->at(nb.code);
-
-            double distanceCost = nb.moveCost;
-            double altitudeChange = std::abs(nb.z - cur.z) * gridSize;
-            double efficiencyCost = (altitudeChange > 0) ? 1.0 : 0.0;
-
-            double baseG = weights.distance * distanceCost;
-            double effPenalty = weights.efficiency * efficiencyCost;
-
-            double safetyPenalty =
-                (weights.comm  * res.commCost) +
-                (weights.nav   * res.navCost)  +
-                (weights.surv  * res.survCost) +
-                (weights.wind  * res.windCost) +
-                (weights.rain  * res.rainCost) +
-                (weights.vis   * res.visCost)  +
-                (weights.temp  * res.tempCost) +
-                (weights.hum   * res.humCost)  +
-                (weights.press * res.pressCost)+
-                (weights.em    * res.emCost);
-
-            double riskPenalty = weights.riskArea * res.riskCost;
-            double privacyPenalty = weights.privacy * res.privacyCost;
-
-            double totalExtraFactor = effPenalty + safetyPenalty + riskPenalty + privacyPenalty;
-            double extraCost = distanceCost * totalExtraFactor;
-
-
-
-
-            // 总代价值汇总
-            double newG = cur.g + baseG + extraCost ;
-
-            GridKey nKey = {nb.x, nb.y, nb.z};
-            auto existing = openMap.find(nKey);
+            const auto& nb = neighbors[index];
+            const double newG = cur.g + check.cost;
+            const GridKey nKey{nb.x, nb.y, nb.z};
+            const auto existing = openMap.find(nKey);
             if (existing != openMap.end() && newG >= existing->second.g) continue;
 
-            double newH = heuristic(nb.x, nb.y, nb.z) * weights.distance;
-            Node next(nb.x, nb.y, nb.z, newG, newH, nb.arrival);
+            const double newH = heuristic(nb.x, nb.y, nb.z) * weights.distance;
+            // 全程保留亚秒精度，只在规则查询和响应输出时转换成整数秒。
+            Node next(nb.x, nb.y, nb.z, newG, newH,
+                      cur.arrivalTime + check.distance / options.speed);
             openSet.push(next);
             openMap[nKey] = next;
             parent[nKey] = cur.key;
@@ -1454,188 +1426,117 @@ Task<AStarResult> aStarPath(
     co_return {false, {}, lastFailReason};
 }
 //----------------------------抽稀函数--------------------------------------
-    Task<vector<string>> thinPathGreedy(
-        const vector<string>& originalPath, //存取抽稀前路径
-        std::shared_ptr<GridEvaluator> evaluator, // 修复：统一变量名为 evaluator
-        int startTime,
-        uint8_t level,
-        double planeRadius,
-        bool enableTrueHeightCheck,
-        RouteMode currentMode
-    )
-    {
-        if (originalPath.size() <= 2) co_return originalPath;
-        vector<string> smoothPath; //存储平滑后的结果
-        smoothPath.push_back(originalPath[0]); //将起点存入平滑路径
-        size_t currentIndex = 0; //当前节点
-        size_t targetIndex = 2; //相隔一个网格的节点
-        const BaseTile& baseTile = ::getProjectBaseTile(); // 获取基准瓦片范围，用于坐标转换
-        uint64_t maxCoord = (1ull << (3 * level)); //用于边界检测
-        int currentTime = getBeijingTime(); //用于时间规则统一
+namespace {
 
-        // 使用与普通 A* 相同的无人机球形缓冲区规则
-        double gridSize = getGridSize(level);
-        std::vector<std::array<int, 3>> sphericalMask;
-        int extendCell = 0;
-        if (planeRadius > 0) {
-            extendCell = static_cast<int>(std::ceil(planeRadius / gridSize));
-            for (int dx = -extendCell; dx <= extendCell; ++dx) {
-                for (int dy = -extendCell; dy <= extendCell; ++dy) {
-                    for (int dz = -extendCell; dz <= extendCell; ++dz) {
-                        double dist = std::sqrt(dx * dx + dy * dy + dz * dz) * gridSize;
-                        if (dist <= planeRadius) {
-                            sphericalMask.push_back({dx, dy, dz});
-                        }
-                    }
-                }
-            }
-        }
-        if (sphericalMask.empty()) {
-            sphericalMask.push_back({0, 0, 0});
-        }
-        // 与普通 A* 保持一致：设置了半径时至少扩展一格缓冲区
-        if (planeRadius > 0 && sphericalMask.size() == 1) {
-            sphericalMask.clear();
-            for (int dx = -1; dx <= 1; ++dx) {
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dz = -1; dz <= 1; ++dz) {
-                        sphericalMask.push_back({dx, dy, dz});
-                    }
-                }
-            }
-        }
-
-        RouteWeights weights = getWeightsByMode(currentMode);
-        auto calcPenalty = [&](const GridEvaluator::CheckResult& res) {
-            double safetyPenalty =
-                (weights.comm  * res.commCost) +
-                (weights.nav   * res.navCost)  +
-                (weights.surv  * res.survCost) +
-                (weights.wind  * res.windCost) +
-                (weights.rain  * res.rainCost) +
-                (weights.vis   * res.visCost)  +
-                (weights.temp  * res.tempCost) +
-                (weights.hum   * res.humCost)  +
-                (weights.press * res.pressCost)+
-                (weights.em    * res.emCost);
-            double riskPenalty = weights.riskArea * res.riskCost;
-            double privacyPenalty = weights.privacy * res.privacyCost;
-            return safetyPenalty + riskPenalty + privacyPenalty;
-        };
-
-        while (targetIndex < originalPath.size())
-        {
-            //获取物理坐标并调用DDA射线算法
-            LatLonHei p1 = getLocalTileLatLon(originalPath[currentIndex], baseTile); //获取当前点坐标
-            LatLonHei p2 = getLocalTileLatLon(originalPath[targetIndex], baseTile); //获取目标点的坐标
-            std::vector<std::array<double, 3>> lineReq{  //记录p1和p2的经纬高
-                {p1.longitude, p1.latitude, p1.height},
-                {p2.longitude, p2.latitude, p2.height}
-            };
-            std::vector<std::string> lineGrids = singleLineToGrids2(lineReq, level, baseTile); //拉取直线
-            // 按无人机半径建立球形缓冲区
-            std::unordered_set<std::string> expandedGridSet;
-            for (const auto& code : lineGrids)
-            {
-                IJH centerIJH = getLocalTileRHC(code);
-                int cx = centerIJH.column;
-                int cy = centerIJH.row;
-                int cz = centerIJH.layer;
-                for (const auto& offset : sphericalMask)
-                {
-                    int nx = cx + offset[0];
-                    int ny = cy + offset[1];
-                    int nz = cz + offset[2];
-                    // 边界保护：兼容负高度和坐标越界
-                    if (nx < 0 || ny < 0 || nz < 0) continue;
-                    if (static_cast<uint64_t>(nx) >= maxCoord || static_cast<uint64_t>(ny) >= maxCoord || static_cast<uint64_t>(nz) >= maxCoord) continue;
-                    IJH nIjh = {(uint32_t)ny, (uint32_t)nx, (uint32_t)nz};
-                    expandedGridSet.insert(rchToCode(nIjh, level));
-                }
-            }
-
-            // ================= 修复核心：循环分离 =================
-            // 1. 先把所有要校验的网格塞进数组
-            vector<CandidateInfo> checkCands;
-            auto norm = normalizeGridTime(startTime, currentTime);
-            for (const auto& code : expandedGridSet)
-            {
-                checkCands.push_back({code, startTime, norm.wdTime, norm.wdRule, true});
-            }
-            // 注意：装填数据的 for 循环在这里结束了！
-
-            // 2. 挂起协程，统一等待 Redis 批量校验完成
-            auto checkResultsPtr = co_await GridCheckAwaiter{evaluator, checkCands};
-
-            // 3. 计算抽稀起止点的最大允许代价 (动态权重判断核心)
-            double maxAllowedPenalty = 0.0;
-            if (checkResultsPtr->count(originalPath[currentIndex])) {
-                maxAllowedPenalty = std::max(maxAllowedPenalty, calcPenalty(checkResultsPtr->at(originalPath[currentIndex])));
-            }
-            if (checkResultsPtr->count(originalPath[targetIndex])) {
-                maxAllowedPenalty = std::max(maxAllowedPenalty, calcPenalty(checkResultsPtr->at(originalPath[targetIndex])));
-            }
-            maxAllowedPenalty += 1e-5; // 容差，防止浮点数精度误差
-
-            // 4. 双指针判定与滑动机制
-            bool isLineSafe = true;
-            for (const auto& code : expandedGridSet) {
-                // 【新增】真高安全校验：拉直的视线绝不能越过 120m 适飞区或 15m 撞地红线
-                if (enableTrueHeightCheck) {
-                    LatLonHei boundary = getLocalTileLatLon(code, baseTile);
-                    float ground = TiffReader::getInstance().getElevation(boundary.longitude, boundary.latitude);
-                    float tHeight = boundary.height - ground;
-
-                    if (tHeight > 120.0f || tHeight < 15.0f) {
-                        isLineSafe = false;
-                        break;
-                    }
-                }
-
-                // 规则及代价校验
-                if (checkResultsPtr->count(code))
-                {
-                    const auto& res = checkResultsPtr->at(code);
-                    if (!res.pass)
-                    {
-                        isLineSafe = false;
-                        break;
-                    }
-                    if (calcPenalty(res) > maxAllowedPenalty)
-                    {
-                        isLineSafe = false; // 直线穿过了比原A*节点代价更高的区域，否决抽稀
-                        break;
-                    }
-                }
-            }
-
-            if (isLineSafe)
-            {
-                targetIndex++;
-            }
-            else
-            {
-                // 不安全撞墙了，退回到上一个确认安全的点作为必经拐点
-                smoothPath.push_back(originalPath[targetIndex - 1]);
-                //将退回的节点当作下一次探索的起点
-                currentIndex = targetIndex - 1;
-                targetIndex = currentIndex + 2;
-            }
-        }
-        smoothPath.push_back(originalPath.back());
-
-        std::vector<std::array<int, 3>> tempWaypoints;
-        for (const auto& code : smoothPath) {
-            IJH p = getLocalTileRHC(code);
-            tempWaypoints.push_back({(int)p.column, (int)p.row, (int)p.layer});
-        }
-        vector<string> finalSmoothPath;
-        for (const auto& wp : tempWaypoints) {
-            IJH p = {(uint32_t)wp[1], (uint32_t)wp[0], (uint32_t)wp[2]};
-            finalSmoothPath.push_back(rchToCode(p, level));
-        }
-        co_return finalSmoothPath;
+Task<AStarResult> thinPathGreedy(
+    const std::vector<std::string>& originalPath,
+    const std::shared_ptr<GridEvaluator>& evaluator,
+    double startTime,
+    uint8_t level,
+    double planeRadius,
+    double speed,
+    bool enableTrueHeightCheck,
+    RouteMode currentMode,
+    const std::vector<VectorObstacle>& obstacles,
+    RouteValidationContext& context) {
+    if (originalPath.empty()) {
+        co_return AStarResult{false, {}, "抽稀输入路径为空"};
     }
+
+    auto runPass = [&](const std::vector<std::string>& path, bool halve) -> Task<AStarResult> {
+        std::vector<std::string> output{path.front()};
+        size_t currentIndex = 0;
+        double currentTime = startTime;
+        while (currentIndex + 1 < path.size()) {
+            // 使用同一出发时间比较快捷线与被替换子路径的积分代价。
+            std::vector<SegmentRequest> baselineRequests;
+            double baselineTime = currentTime;
+            for (size_t index = currentIndex; index + 1 < path.size(); ++index) {
+                baselineRequests.push_back({
+                    path[index], path[index + 1], baselineTime,
+                    currentIndex == 0 && index == 0});
+                baselineTime += gridDistanceMeters(path[index], path[index + 1], level) / speed;
+            }
+            const auto baseline = co_await checkRouteSegments(
+                baselineRequests, evaluator, level, planeRadius, speed,
+                enableTrueHeightCheck, currentMode, obstacles, context);
+            std::vector<double> prefixCost(baseline.size() + 1, 0.0);
+            std::vector<bool> prefixSafe(baseline.size() + 1, true);
+            for (size_t index = 0; index < baseline.size(); ++index) {
+                prefixCost[index + 1] = prefixCost[index] + baseline[index].cost;
+                prefixSafe[index + 1] = prefixSafe[index] && baseline[index].safe;
+            }
+
+            size_t targetIndex = path.size() - 1;
+            bool found = false;
+            std::string lastReason;
+            while (targetIndex > currentIndex) {
+                const std::vector<SegmentRequest> shortcutRequests{
+                    {path[currentIndex], path[targetIndex], currentTime,
+                     currentIndex == 0 && targetIndex == 1}};
+                const auto checks = co_await checkRouteSegments(
+                    shortcutRequests, evaluator, level, planeRadius, speed,
+                    enableTrueHeightCheck, currentMode, obstacles, context);
+                const auto& shortcut = checks.front();
+                const size_t replacedCount = targetIndex - currentIndex;
+                // 不把软代价当作禁止通行；仅拒绝比可行原子路径更差的替换。
+                const bool acceptableCost = !prefixSafe[replacedCount] ||
+                    shortcut.cost <= prefixCost[replacedCount] + 1e-5;
+                if (shortcut.safe && acceptableCost) {
+                    found = true;
+                    currentTime += shortcut.distance / speed;
+                    break;
+                }
+                lastReason = shortcut.safe ? "快捷线累计代价高于原子路径" : shortcut.reason;
+                if (targetIndex == currentIndex + 1) break;
+                targetIndex = halve
+                    ? currentIndex + std::max<size_t>(1, (targetIndex - currentIndex) / 2)
+                    : targetIndex - 1;
+            }
+            if (!found) {
+                co_return AStarResult{false, {}, "抽稀连接失败: " + lastReason};
+            }
+            output.push_back(path[targetIndex]);
+            currentIndex = targetIndex;
+        }
+        co_return AStarResult{true, std::move(output), ""};
+    };
+
+    auto first = co_await runPass(originalPath, true);
+    if (!first.success) {
+        // 快捷线改变后续到达时间后，原后缀可能不可行；回退必须重新验证。
+        std::vector<SegmentRequest> requests;
+        double time = startTime;
+        for (size_t index = 0; index + 1 < originalPath.size(); ++index) {
+            requests.push_back({
+                originalPath[index], originalPath[index + 1], time,
+                index == 0});
+            time += gridDistanceMeters(originalPath[index], originalPath[index + 1], level) / speed;
+        }
+        if (requests.empty()) requests.push_back({originalPath.front(), originalPath.front(), time});
+        const auto checks = co_await checkRouteSegments(
+            requests, evaluator, level, planeRadius, speed,
+            enableTrueHeightCheck, currentMode, obstacles, context);
+        for (const auto& check : checks) {
+            if (!check.safe) {
+                LOG_WARN << "[A*] " << first.reason << "；原路径复检失败: " << check.reason;
+                co_return AStarResult{false, {}, "原路径复检失败: " + check.reason};
+            }
+        }
+        LOG_WARN << "[A*] " << first.reason << "；保留已通过统一校验的原路径";
+        co_return AStarResult{true, originalPath, ""};
+    }
+    if (first.path.size() <= 2) co_return first;
+    auto refined = co_await runPass(first.path, false);
+    // 第二轮可能改变时间分布；失败时第一轮结果仍按其实际时间通过了校验。
+    if (!refined.success) {
+        LOG_WARN << "[A*] 抽稀精查失败，保留已验证第一轮结果: " << refined.reason;
+        co_return first;
+    }
+    co_return refined;
+}
+
+}  // namespace
 // === 接口实现 ===
     // 1. 公开接口：原始路径 (原有的接口，保持向后兼容)
     Task<void> Astar::AstarPathPlane(const drogon::HttpRequestPtr req,
@@ -1689,7 +1590,7 @@ Task<AStarResult> aStarPath(
         }
 
         const BaseTile& baseTile = ::getProjectBaseTile();
-        vector<array<int, 3>> waypoints;
+        vector<RouteWaypoint> waypoints;
 
         for (unsigned int i = 0; i < pointsArr.size(); ++i) {
             Json::Value point = pointsArr[i];
@@ -1705,13 +1606,38 @@ Task<AStarResult> aStarPath(
 
             IJH ijh = localRowColHeiNumber(static_cast<uint8_t>(level), lon, lat, height, baseTile);
             int layer = static_cast<int32_t>(ijh.layer);
-            waypoints.push_back({static_cast<int>(ijh.column), static_cast<int>(ijh.row), layer});
+            waypoints.push_back(RouteWaypoint{
+                {
+                    static_cast<int>(ijh.column),
+                    static_cast<int>(ijh.row),
+                    layer
+                },
+                true
+            });
         }
 
         long long rawStartTime = (*jsonBody).get("startTime", static_cast<Json::Int64>(getBeijingTime())).asInt64();
         int startTime = (rawStartTime > 9999999999LL) ? static_cast<int>(rawStartTime / 1000) : rawStartTime;
 
-        double planeRadius = (*jsonBody).get("planeRadius", 0.75).asDouble();
+        if (jsonBody->isMember("planeRadius") && !(*jsonBody)["planeRadius"].isNumeric()) {
+            Json::Value response;
+            response["status"] = "error";
+            response["message"] = "planeRadius 必须是数值";
+            auto resp = HttpResponse::newHttpJsonResponse(response);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            co_return;
+        }
+        const double planeRadius = (*jsonBody).get("planeRadius", 0.75).asDouble();
+        if (!std::isfinite(planeRadius) || planeRadius < 0.0) {
+            Json::Value response;
+            response["status"] = "error";
+            response["message"] = "planeRadius 必须是非负有限数值";
+            auto resp = HttpResponse::newHttpJsonResponse(response);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            co_return;
+        }
 
         // speed 统一表示飞行速度，单位为米/秒。
         if (jsonBody->isMember("speed") && !(*jsonBody)["speed"].isNumeric()) {
@@ -1829,7 +1755,7 @@ Task<AStarResult> aStarPath(
                                              point[1].asDouble(),
                                              absoluteTargetHeight,
                                              baseTile);
-            waypoints[i][2] = static_cast<int>(wpIJH.layer);
+            waypoints[i].grid[2] = static_cast<int>(wpIJH.layer);
         }
 
         // 为了兼容后续调用 A* 时传入的 workLayer 参数，将其指向起点的作业层
@@ -1913,6 +1839,7 @@ Task<AStarResult> aStarPath(
         vector<string> fullPath;
         vector<int> pathIndexes;
         vector<string> waypointCodes;
+        vector<size_t> mustPassIndices;
         bool pathSuccess = true;
         string failReason;
 
@@ -1921,60 +1848,134 @@ Task<AStarResult> aStarPath(
             gridEvaluator = GridEvaluator::create(ruleOptions);
         }
         LOG_INFO << "[A*] 开始数据库可见图绕行预处理";
+        std::vector<VectorObstacle> thinningObstacles;
         insertDatabaseVisibilityWaypoints(
-            waypoints, level, baseTile, currentMode, startTime);
-        int currentSegmentStartTime = startTime;
+            waypoints, level, baseTile, currentMode, startTime,
+            thinningObstacles);
+        RouteValidationContext validation;
+        double cruiseStartTime = startTime;
+        for (size_t index = 0; index + 1 < verticalPath.size(); ++index) {
+            cruiseStartTime += gridDistanceMeters(verticalPath[index], verticalPath[index + 1], level) / speed;
+        }
+        double currentSegmentStartTime = cruiseStartTime;
 
         for (size_t i = 0; i < waypoints.size() - 1 && pathSuccess; ++i) {
-            AStarResult segmentResult;
-
-            if (isUnconstrained) {
-                LOG_INFO << "[A*] 航段 " << i+1 << " 使用无约束模式（简化版A*）";
-                segmentResult = aStarPathSimple(waypoints[i], waypoints[i + 1], options, level, workLayer, enableTrueHeightCheck);
-            } else {
-                LOG_INFO << "[A*] 航段 " << i+1 << " 使用约束模式（协程版A*）";
-                segmentResult = co_await aStarPath(
-                    waypoints[i], waypoints[i + 1], currentSegmentStartTime, planeRadius, options, level, gridEvaluator,
-                    workLayer, currentMode, enableTrueHeightCheck
-                );
-            }
+            LOG_INFO << "[A*] 航段 " << i + 1 << " 使用"
+                     << (isUnconstrained ? "无约束模式" : "约束模式")
+                     << "（协程版A*）";
+            AStarResult segmentResult = co_await aStarPath(
+                waypoints[i].grid, waypoints[i + 1].grid,
+                currentSegmentStartTime, planeRadius, options, level, gridEvaluator,
+                workLayer, currentMode, enableTrueHeightCheck,
+                thinningObstacles, validation);
 
             if (!segmentResult.success) {
                 pathSuccess = false;
                 failReason = segmentResult.reason;
                 break;
             }
-            // 调用平滑函数 (根据 applySmoothing 标志决定是否执行)
-            if (applySmoothing && !isUnconstrained && !segmentResult.path.empty() && gridEvaluator) {
-                LOG_INFO << "[A*] 航段 " << i+1 << " 开始执行A*航线抽稀...";
-                segmentResult.path = co_await thinPathGreedy(segmentResult.path, gridEvaluator, currentSegmentStartTime, level, planeRadius, enableTrueHeightCheck, currentMode);
-            }
-            if (!segmentResult.path.empty()) {
-                double stepGridSize = getGridSize(level);
-                int segmentDuration = 0;
-                for(size_t j = 0; j < segmentResult.path.size() - 1; ++j) {
-                    IJH p1 = getLocalTileRHC(segmentResult.path[j]);
-                    IJH p2 = getLocalTileRHC(segmentResult.path[j+1]);
-                    double dx = (int)p2.column - (int)p1.column;
-                    double dy = (int)p2.row - (int)p1.row;
-                    double dz = (int)p2.layer - (int)p1.layer;
-                    // 精确计算 26方向 实际发生的欧几里得距离，累加时间
-                    segmentDuration += static_cast<int>(std::sqrt(dx*dx + dy*dy + dz*dz) * stepGridSize / options.speed);
-                }
-                currentSegmentStartTime += segmentDuration;
+            if (segmentResult.path.empty()) {
+                pathSuccess = false;
+                failReason = "A*返回了空路径";
+                break;
             }
 
-            size_t segmentIndex = i + 1;
+            for (size_t j = 0; j + 1 < segmentResult.path.size(); ++j) {
+                currentSegmentStartTime += gridDistanceMeters(
+                    segmentResult.path[j], segmentResult.path[j + 1], level) / options.speed;
+            }
+
             if (i == 0) {
                 fullPath = segmentResult.path;
-                pathIndexes.assign(segmentResult.path.size(), segmentIndex);
+                if (waypoints.front().mustPass) {
+                    mustPassIndices.push_back(0);
+                }
             } else {
-                fullPath.insert(fullPath.end(), segmentResult.path.begin() + 1, segmentResult.path.end());
-                pathIndexes.insert(pathIndexes.end(), segmentResult.path.size() - 1, segmentIndex);
+                fullPath.insert(
+                    fullPath.end(),
+                    segmentResult.path.begin() + 1,
+                    segmentResult.path.end());
             }
 
-            if (i < waypoints.size() - 2 && !segmentResult.path.empty()) {
-                waypointCodes.push_back(segmentResult.path.back());
+            if (waypoints[i + 1].mustPass) {
+                const size_t index = fullPath.size() - 1;
+                if (mustPassIndices.empty() || mustPassIndices.back() != index) {
+                    mustPassIndices.push_back(index);
+                }
+            }
+        }
+
+
+        if (pathSuccess && applySmoothing && fullPath.size() > 2) {
+            LOG_INFO << "[A*] 开始对完整分段航线按前端必经点整体抽稀";
+            std::vector<std::string> smoothedPath;
+            std::vector<int> smoothedIndexes;
+            std::vector<std::string> frontendWaypointCodes;
+            double sectionStartTime = cruiseStartTime;
+
+            for (size_t sectionIndex = 0;
+                 sectionIndex + 1 < mustPassIndices.size();
+                 ++sectionIndex) {
+                const size_t begin = mustPassIndices[sectionIndex];
+                const size_t end = mustPassIndices[sectionIndex + 1];
+                std::vector<std::string> section(
+                    fullPath.begin() + begin,
+                    fullPath.begin() + end + 1);
+
+                // 有向时间规则按实际飞行方向计算，不能倒转航线后复用结果。
+                auto smoothed = co_await thinPathGreedy(
+                    section, gridEvaluator, sectionStartTime,
+                    static_cast<uint8_t>(level), planeRadius, options.speed,
+                    enableTrueHeightCheck, currentMode,
+                    thinningObstacles, validation);
+                if (!smoothed.success) {
+                    pathSuccess = false;
+                    failReason = smoothed.reason;
+                    break;
+                }
+                const auto& selectedPath = smoothed.path;
+
+                const size_t appendBegin = smoothedPath.empty() ? 0 : 1;
+                for (size_t index = appendBegin; index < selectedPath.size(); ++index) {
+                    smoothedPath.push_back(selectedPath[index]);
+                    smoothedIndexes.push_back(static_cast<int>(sectionIndex + 1));
+                }
+
+                if (sectionIndex + 1 < mustPassIndices.size() - 1 &&
+                    !selectedPath.empty()) {
+                    frontendWaypointCodes.push_back(selectedPath.back());
+                }
+
+                for (size_t index = 0; index + 1 < selectedPath.size(); ++index) {
+                    sectionStartTime += gridDistanceMeters(
+                        selectedPath[index], selectedPath[index + 1], level) / options.speed;
+                }
+            }
+
+            fullPath = std::move(smoothedPath);
+            pathIndexes = std::move(smoothedIndexes);
+            waypointCodes = std::move(frontendWaypointCodes);
+        } else if (pathSuccess) {
+            pathIndexes.assign(fullPath.size(), 1);
+            waypointCodes.clear();
+
+            for (size_t sectionIndex = 0;
+                 sectionIndex + 1 < mustPassIndices.size();
+                 ++sectionIndex) {
+                size_t begin = mustPassIndices[sectionIndex];
+                const size_t end = mustPassIndices[sectionIndex + 1];
+                if (sectionIndex > 0) {
+                    ++begin;
+                }
+                for (size_t index = begin;
+                     index <= end && index < pathIndexes.size();
+                     ++index) {
+                    pathIndexes[index] = static_cast<int>(sectionIndex + 1);
+                }
+            }
+
+            for (size_t index = 1; index + 1 < mustPassIndices.size(); ++index) {
+                waypointCodes.push_back(fullPath[mustPassIndices[index]]);
             }
         }
 
@@ -2004,7 +2005,7 @@ Task<AStarResult> aStarPath(
             finalIsVertical.insert(finalIsVertical.end(), fullPath.size(), false);
 
             if (!landingPath.empty()) {
-                int landingIndex = static_cast<int>(waypoints.size());
+                int landingIndex = static_cast<int>(pointsArr.size());
                 finalPath.insert(finalPath.end(), landingPath.begin(), landingPath.end());
                 finalPathIndexes.insert(finalPathIndexes.end(), landingPath.size(), landingIndex);
                 finalIsVertical.insert(finalIsVertical.end(), landingPath.size(), true);

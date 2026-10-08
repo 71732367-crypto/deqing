@@ -1,5 +1,6 @@
 #include "LineToGrids.h"
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <algorithm>
 
@@ -69,8 +70,20 @@ static std::vector<std::string> lineInsertPointsDDA(const std::array<double, 3>&
     double currLat = p1[1];
     double currH = p1[2];
 
-    // 安全计数器，防止极端情况死循环
-    int safetyNet = 1000;
+    // 按起终点网格的曼哈顿距离设置上限，避免长线段被固定1000步截断。
+    const IJH startIJH = getLocalTileRHC(startCode);
+    const IJH endIJH = getLocalTileRHC(endCode);
+    std::size_t safetyNet = static_cast<std::size_t>(
+        std::llabs(
+            static_cast<long long>(endIJH.column) -
+            static_cast<long long>(startIJH.column)) +
+        std::llabs(
+            static_cast<long long>(endIJH.row) -
+            static_cast<long long>(startIJH.row)) +
+        std::llabs(
+            static_cast<long long>(endIJH.layer) -
+            static_cast<long long>(startIJH.layer)) +
+        3);
 
     while (currentCode != endCode && safetyNet > 0) {
         safetyNet--;

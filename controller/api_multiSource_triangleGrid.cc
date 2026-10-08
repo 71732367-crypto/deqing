@@ -21,7 +21,9 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
-
+#include <charconv>
+#include <cctype>
+#include <map>
 
 
 using namespace api::multiSource;
@@ -311,22 +313,89 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             // 处理当前分块 - 使用独立的变量确保内存隔离
             std::vector<Triangle> triangles;
             {
-                // 并行提取两个层级的三角形数据
-                auto future20 = std::async(std::launch::async, [&chunkFolder]() {
-                    std::vector<Triangle> t;
-                    extractTrianglesFromLevelFiles(chunkFolder, 20, t);
-                    return t;
-                });
-                auto future21 = std::async(std::launch::async, [&chunkFolder]() {
-                    std::vector<Triangle> t;
-                    extractTrianglesFromLevelFiles(chunkFolder, 21, t);
-                    return t;
-                });
-                std::vector<Triangle> t20 = future20.get();
-                std::vector<Triangle> t21 = future21.get();
-                triangles.reserve(t20.size() + t21.size());
-                triangles.insert(triangles.end(), std::make_move_iterator(t20.begin()), std::make_move_iterator(t20.end()));
-                triangles.insert(triangles.end(), std::make_move_iterator(t21.begin()), std::make_move_iterator(t21.end()));
+                std::map<int, std::vector<std::filesystem::path>> levelFiles;
+                std::vector<std::filesystem::path> unlevelledFiles;
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(chunkFolder)) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string name = entry.path().filename().string();
+                    std::transform(name.begin(), name.end(), name.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (!name.ends_with(".osgb")) continue;
+                    bool hasLevel=false;
+                    for (size_t pos = name.find("_l"); pos != std::string::npos;
+                        pos=name.find("_l",pos+2))
+                    {
+                        size_t end = pos + 2;
+                        while (end<name.size()&&std::isdigit(static_cast<unsigned char>(name[end])))end++;
+                        if (end==pos+2||name[end]!='_'&&name[end]!='.') continue;
+                        int osgbLevel=0;
+                        auto [ptr, error] = std::from_chars(name.data() + pos + 2, name.data() + end, osgbLevel);
+                        if (error == std::errc{} && ptr == name.data() + end) {
+                            levelFiles[osgbLevel].push_back(entry.path());
+                            hasLevel = true;
+                            break;
+                        }
+                    }
+                    if (!hasLevel) unlevelledFiles.push_back(entry.path());
+                }
+                std::vector<std::vector<std::filesystem::path>> selectedFiles;
+                for (int preferredLevel : {20, 21}) {
+                    auto it = levelFiles.find(preferredLevel);
+                    if (it != levelFiles.end()) {
+                        LOG_INFO << "将提取 OSGB 模型层级 L" << preferredLevel
+                                 << "，文件数: " << it->second.size();
+                        selectedFiles.push_back(std::move(it->second));
+                    }
+                }
+
+                if (selectedFiles.empty()) {
+                    for (auto it = levelFiles.rbegin();
+                         it != levelFiles.rend() && selectedFiles.size() < 2; ++it) {
+                        LOG_INFO << "将提取 OSGB 模型层级 L" << it->first
+                                 << "，文件数: " << it->second.size();
+                        selectedFiles.push_back(std::move(it->second));
+                         }
+                }
+
+                if (selectedFiles.empty() && !unlevelledFiles.empty()) {
+                    LOG_INFO << "未发现 L 层级文件，将提取普通 OSGB 文件，数量: "
+                             << unlevelledFiles.size();
+                    selectedFiles.push_back(std::move(unlevelledFiles));
+                }
+
+                // 每个选中层级独立提取，按分块内已处理文件数输出总进度。
+                size_t totalFiles = 0;
+                for (const auto& files : selectedFiles) {
+                    totalFiles += files.size();
+                }
+                std::atomic<size_t> completedFiles{0};
+                LOG_INFO << "开始提取 OSGB 文件，总数: " << totalFiles;
+
+                std::vector<std::future<std::vector<Triangle>>> futures;
+                for (const auto& files : selectedFiles) {
+                    futures.push_back(std::async(std::launch::async, [files, &completedFiles, totalFiles]() {
+                        std::vector<Triangle> result;
+                        for (const auto& file : files) {
+                            osg::ref_ptr<osg::Node> node = osgDB::readNodeFile(file.string());
+                            if (node) extractTriangles(node.get(), result);
+                            else LOG_WARN << "加载 OSGB 文件失败: " << file.string();
+
+                            const size_t done = completedFiles.fetch_add(1, std::memory_order_relaxed) + 1;
+                            if (done == 1 || done % 800 == 0 || done == totalFiles) {
+                                LOG_INFO << "OSGB 文件处理进度: " << done << "/" << totalFiles
+                                         << " (" << static_cast<int>(100.0 * done / totalFiles) << "%)";
+                            }
+                        }
+                        return result;
+                    }));
+                }
+
+                for (auto& future : futures) {
+                    auto extracted = future.get();
+                    triangles.insert(triangles.end(), std::make_move_iterator(extracted.begin()),
+                                     std::make_move_iterator(extracted.end()));
+                }
+
             }
 
             if (triangles.empty()) {
@@ -494,14 +563,12 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         if (totalTrianglesProcessed.load() == 0)
         {
             Json::Value err;
-            err["Status"] = "error";
-            err["Message"] = "未识别到有效的 OSGB 模型文件或未提取到三角形面片数据，请检查目录与数据";
-            err["data"]["total_triangles_processed"] = 0;
-            err["data"]["total_grid_count"] = 0;
-            err["data"]["total_discarded_triangles"] = 0;
+            err["status"] = "error";
+            err["message"] = "未识别到有效的 OSGB 模型文件或未提取到三角形面片数据，请检查目录与数据";
             auto resp = HttpResponse::newHttpJsonResponse(err);
             resp->setStatusCode(k400BadRequest);
             callback(resp);
+            return;
         }
 
         Json::Value res;
