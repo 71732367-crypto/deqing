@@ -7,7 +7,7 @@
 #include <dqg/DQG3DProximity.h>
 #include <dqg/GlobalBaseTile.h>
 #include "LineToGrids.h"
-
+#include <algorithm>
 #include <iostream>
 #include <vector>
 #include <queue>
@@ -1014,6 +1014,37 @@ void ensureSphericalMask(
             }
         }
     }
+
+    // 在原球形缓冲基础上，沿 Z 方向上下各扩展一层。
+    std::vector<std::array<int, 3>> expandedMask;
+    expandedMask.reserve(context.sphericalMask.size() * 3);
+
+    for (const auto& offset : context.sphericalMask) {
+        // 原缓冲位置。
+        expandedMask.push_back(offset);
+
+        // 原缓冲位置正下方一层。
+        expandedMask.push_back({
+            offset[0],
+            offset[1],
+            offset[2] - 1
+        });
+
+        // 原缓冲位置正上方一层。
+        expandedMask.push_back({
+            offset[0],
+            offset[1],
+            offset[2] + 1
+        });
+    }
+
+    // 合并重复偏移，避免重复查询相同网格。
+    std::sort(expandedMask.begin(), expandedMask.end());
+    expandedMask.erase(
+        std::unique(expandedMask.begin(), expandedMask.end()),
+        expandedMask.end());
+
+    context.sphericalMask = std::move(expandedMask);
 }
 
 
