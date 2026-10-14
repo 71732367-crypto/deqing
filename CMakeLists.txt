@@ -84,6 +84,8 @@ add_executable(${PROJECT_NAME} main.cc
         controller/api_multiSource_tifGrid.h
         text/prefixToCode.cc
         text/prefixToCode.h
+        controller/api_multiSource_topology.cpp
+        controller/api_multiSource_topology.h
 )
 # ##############################################################################
 # 链接库

@@ -284,37 +284,14 @@ string getLevelFatherCode(const string& code, uint8_t level) {
     return code; // 若请求的层级不小于当前层级，则返回自身
 }
 
-// 获取子网格编码
-vector<string> getChildCode(const string& code) {
-    vector<string> childCode;
-    string codeLast = code.substr(1); // 获取除第一位以外的编码
-
-    // 判断是否为退化单元（三角形网格编码）
-    if (codeLast.find_first_of("123567") == string::npos) {
-        // 二进制编码左移三位然后再异或 0, 2, 3, 4, 6, 7
-        vector<int> offsets = { 0, 2, 3, 4, 6, 7 };
-        for (int offset : offsets) {
-            unsigned long long childNumeric = (stoull(code, nullptr, 8) << 3) ^ offset;
-            string childStr = to_string(childNumeric);
-            if (code[0] == '0') {
-                childStr = string(code.length() - childStr.length() + 1, '0') + childStr;
-            }
-            childCode.push_back(childStr);
-        }
+/// 局部立方网格每级追加一位八进制编码，八个子网格均保留父编码前缀。
+std::vector<std::string> getChildCode(const std::string& code) {
+    std::vector<std::string> children;
+    children.reserve(8);
+    for (char digit = '0'; digit <= '7'; ++digit) {
+        children.push_back(code + digit);
     }
-    else {
-        // 非退化单元，八个子网格
-        vector<int> offsets = { 0, 1, 2, 3, 4, 5, 6, 7 };
-        for (int offset : offsets) {
-            unsigned long long childNumeric = (stoull(code, nullptr, 8) << 3) ^ offset;
-            string childStr = to_string(childNumeric);
-            if (code[0] == '0') {
-                childStr = string(code.length() - childStr.length() + 1, '0') + childStr;
-            }
-            childCode.push_back(childStr);
-        }
-    }
-    return childCode;
+    return children;
 }
 
 

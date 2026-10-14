@@ -1,4 +1,4 @@
-# dqglib 函数接口文档
+ # dqglib 函数接口文档
 
 > **最后更新时间**：2026年9月16日
 
@@ -265,7 +265,7 @@ uint64_t getDQGCellFatherBylevel_MTCode(uint64_t code, uint8_t level);
 ### 4.2 子网格查询
 
 #### `getChildCode`
-获取网格的所有子网格编码。
+获取局部三维立方网格的下一层级八个子网格编码，依次追加 `0` 到 `7`，保留前导零。
 
 **函数原型 (DQG3DBasic.h):**
 ```cpp
@@ -276,7 +276,11 @@ std::vector<std::string> getChildCode(const std::string& code);
 - `code` (const std::string&): 父网格编码
 
 **返回值:**
-- 子网格编码数组（通常8个子网格）
+- 子网格编码数组（固定 8 个，例如 `"123"` 返回 `"1230"` 到 `"1237"`）
+
+HTTP 接口 `POST /api/multiSource/basicGrid/getChildCode` 请求示例：`{"gridCode":"123"}`。
+父编码须为 1～20 位八进制字符串，也可传入合法的 `LGC1` 互操作编码；返回字段保持为 `data.gridCode` 和 `data.childcode`。
+非对象请求体、非字符串或非法编码，以及无法继续细分的 21 层父编码返回 HTTP 400。
 
 **调用示例:**
 ```cpp
