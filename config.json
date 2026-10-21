@@ -49,11 +49,11 @@
             //filename: Sqlite3 db file name
             //"filename":"",
             //host: Server address,localhost by default
-            "host": "localhost",
+            "host": "192.168.3.6",
             //port: Server port, 5432 by default
-            "port": 9990,
+            "port": 9700,
             //dbname: Database name
-            "dbname": "postgres",
+            "dbname": "grid_dev",
             //user: 'postgres' by default
             "user": "postgres",
             //passwd: '' by default

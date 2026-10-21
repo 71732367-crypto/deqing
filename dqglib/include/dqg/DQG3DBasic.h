@@ -21,7 +21,7 @@ Gridbox Codes2Gridbox(const std::string& code);
 /// @brief 获取指定级别的父网格编码
 std::string getLevelFatherCode(const std::string& code, uint8_t level);
 
-/// @brief 获取所有子网格编码
+/// @brief 获取局部立方网格的下一层级八个子网格编码，保留前导零
 std::vector<std::string> getChildCode(const std::string& code);
 
 /// @brief 计算局部网格的配置

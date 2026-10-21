@@ -526,7 +526,7 @@ void basicGrid::getChildCode(const HttpRequestPtr& req, std::function<void (cons
     try {
         // 解析请求体中的JSON数据
         auto jsonBody = req->getJsonObject();
-        if (!jsonBody) {
+        if (!jsonBody || !jsonBody->isObject()) {
             Json::Value response;
             response["status"] = "error";
             response["message"] = "请求体必须是有效的JSON格式";
@@ -541,6 +541,16 @@ void basicGrid::getChildCode(const HttpRequestPtr& req, std::function<void (cons
             Json::Value response;
             response["status"] = "error";
             response["message"] = "缺少必需参数: gridCode";
+            auto resp = HttpResponse::newHttpJsonResponse(response);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+
+        if (!(*jsonBody)["gridCode"].isString()) {
+            Json::Value response;
+            response["status"] = "error";
+            response["message"] = "gridCode 必须为字符串";
             auto resp = HttpResponse::newHttpJsonResponse(response);
             resp->setStatusCode(k400BadRequest);
             callback(resp);
@@ -572,6 +582,18 @@ void basicGrid::getChildCode(const HttpRequestPtr& req, std::function<void (cons
             return;
         }
         parentCode = localParentCode;
+
+        // 局部 Morton 编码最多支持 21 层，父网格必须留出一层供子网格使用。
+        if (parentCode.empty() || parentCode.size() > 20 ||
+            parentCode.find_first_not_of("01234567") != std::string::npos) {
+            Json::Value response;
+            response["status"] = "error";
+            response["message"] = "父网格编码必须为 1-20 位八进制字符串，子网格最高支持 21 层";
+            auto resp = HttpResponse::newHttpJsonResponse(response);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
 
         std::vector<std::string> children = ::getChildCode(parentCode);
 
@@ -780,10 +802,10 @@ void basicGrid::getGridCodeByPoint(const HttpRequestPtr& req, std::function<void
             return;
         }
 
-        if (level < 1 || level > 15) {
+        if (level < 1 || level > 20) {
             Json::Value response;
             response["status"] = "error";
-            response["message"] = "层级必须在1到15之间";
+            response["message"] = "层级必须在1到20之间";
             auto resp = HttpResponse::newHttpJsonResponse(response);
             resp->setStatusCode(k400BadRequest);
             callback(resp);

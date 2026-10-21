@@ -4,6 +4,12 @@
 #include <unordered_set>
 #include <drogon/drogon.h>
 #include <dqg/DQG3DTil.h>
+#include <fstream>
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+#include <memory>
+#include <json/json.h>
 
 // 补齐 GDAL 强依赖的 C 风格宏定义
 #ifndef MIN
@@ -19,6 +25,53 @@
 #include <gdal/cpl_port.h>
 
 namespace TIFGridProcessor {
+
+    /// 每次网格化任务重新读取研究区域，任务内保持同一份边界。
+    static BaseTile getRegionBounds() {
+        std::ifstream regionFile("./region.json");
+        if (!regionFile.is_open()) {
+            regionFile.open("../region.json");
+        }
+        if (!regionFile.is_open()) {
+            throw std::runtime_error("无法读取region.json");
+        }
+        Json::Value root;
+        Json::Reader reader;
+        if (!reader.parse(regionFile, root)) {
+            throw std::runtime_error("region.json 解析失败");
+        }
+        if (!root.isObject() || !root["region"].isObject() ||
+            !root["region"]["bounds"].isObject()) {
+            throw std::runtime_error("region.json 中的 region.bounds 无效");
+        }
+        const auto& bounds = root["region"]["bounds"];
+
+        BaseTile region{};
+        region.west = region.south = std::numeric_limits<double>::infinity();
+        region.east = region.north = -std::numeric_limits<double>::infinity();
+        for (const char* corner : {"southwest", "northwest", "northeast", "southeast"}) {
+            const auto& point = bounds[corner];
+            if (!point.isObject() || !point["longitude"].isNumeric() ||
+                !point["latitude"].isNumeric()) {
+                throw std::runtime_error(std::string("region.json 缺少有效角点: ") + corner);
+            }
+            const double longitude = point["longitude"].asDouble();
+            const double latitude = point["latitude"].asDouble();
+            if (!std::isfinite(longitude) || !std::isfinite(latitude) ||
+                longitude < -180.0 || longitude > 180.0 ||
+                latitude < -90.0 || latitude > 90.0) {
+                throw std::runtime_error(std::string("region.json 角点经纬度越界: ") + corner);
+            }
+            region.west = std::min(region.west, longitude);
+            region.east = std::max(region.east, longitude);
+            region.south = std::min(region.south, latitude);
+            region.north = std::max(region.north, latitude);
+        }
+        if (region.west >= region.east || region.south >= region.north) {
+            throw std::runtime_error("region.json 研究区域宽度和高度必须大于零");
+        }
+        return region;
+    }
 
     bool readDEMBlockToPoints(GDALRasterBand* poBand, double* adfGeoTransform,
                               int xOff, int yOff, int xSize, int ySize,
@@ -45,9 +98,15 @@ namespace TIFGridProcessor {
         return true;
     }
 
-    std::vector<Triangle> buildTIN(const std::vector<PointLBHd>& points, int width, int height, double noDataValue) {
+    static std::vector<Triangle> buildTINInRegion(const std::vector<PointLBHd>& points, int width, int height,
+                                                double noDataValue, const BaseTile& region) {
         std::vector<Triangle> faces;
         faces.reserve((width - 1) * (height - 1) * 2);
+
+        const auto outsideRegion = [&region](const PointLBHd& p) {
+            return p.Lng < region.west || p.Lng > region.east ||
+                   p.Lat < region.south || p.Lat > region.north;
+        };
 
         for (int y = 0; y < height - 1; ++y) {
             for (int x = 0; x < width - 1; ++x) {
@@ -61,6 +120,11 @@ namespace TIFGridProcessor {
                     continue;
                 }
 
+                // 小块任一顶点越界就跳过，不生成三角面及后续网格编码。
+                if (outsideRegion(p1) || outsideRegion(p2) ||
+                    outsideRegion(p3) || outsideRegion(p4)) {
+                    continue;
+                }
                 faces.push_back({p1, p4, p3});
                 faces.push_back({p1, p2, p4});
             }
@@ -68,37 +132,47 @@ namespace TIFGridProcessor {
         return faces;
     }
 
+    std::vector<Triangle> buildTIN(const std::vector<PointLBHd>& points, int width, int height, double noDataValue) {
+        return buildTINInRegion(points, width, height, noDataValue, getRegionBounds());
+    }
+
     size_t convertTIFtoGridCodes(const std::string &tifFilePath, const TIFGridProcessor::TIFGridConfig &config, std::function<void(const std::vector<std::string>&)> batchCallback) {
+        const BaseTile region = getRegionBounds();
+        const BaseTile baseTile = ::getProjectBaseTile();
+        if (region.west < baseTile.west || region.east > baseTile.east ||
+            region.south < baseTile.south || region.north > baseTile.north) {
+            throw std::runtime_error("region.json 超出当前基础瓦片，请重启服务更新基础瓦片后再网格化");
+        }
         GDALAllRegister();
 
         // ✨ 限制 GDAL 缓存上限，防止超大 TIF 撑爆内存
         CPLSetConfigOption("GDAL_CACHEMAX", "256");
 
-        GDALDataset* poDataset = (GDALDataset*)GDALOpen(tifFilePath.c_str(), GA_ReadOnly);
+        // 后续计算或写入回调抛出异常时也必须关闭 TIFF。
+        std::unique_ptr<GDALDataset, decltype(&GDALClose)> poDataset(
+            static_cast<GDALDataset*>(GDALOpen(tifFilePath.c_str(), GA_ReadOnly)), GDALClose);
 
         if (poDataset == nullptr) {
-            LOG_ERROR << "错误：无法打开 TIF 文件 " << tifFilePath;
-            return 0;
+            throw std::runtime_error("无法打开 TIF 文件");
         }
 
         int totalWidth = poDataset->GetRasterXSize();
         int totalHeight = poDataset->GetRasterYSize();
         GDALRasterBand* poBand = poDataset->GetRasterBand(1);
+        if (!poBand) {
+            throw std::runtime_error("TIF 文件缺少高程波段");
+        }
 
         double adfGeoTransform[6];
         if (poDataset->GetGeoTransform(adfGeoTransform) != CE_None) {
-            LOG_ERROR << "错误：该 TIF 文件不包含地理坐标变换信息";
-            GDALClose(poDataset);
-            return 0;
+            throw std::runtime_error("TIF 文件不包含地理坐标变换信息");
         }
-
-        BaseTile baseTile = getProjectBaseTile();
 
         std::unordered_set<std::string> batchGridCodes;
         size_t totalGenerated = 0;
 
-        // 批次上限，存够 10000 个就触发回调推入 Redis
-        const size_t BATCH_LIMIT = 10000;
+        // 回调批次严格不超过 100000，使单条入库 SQL 最多处理十万个网格。
+        const size_t BATCH_LIMIT = 100000;
 
         const int BLOCK_SIZE = 512;
         const int STEP = BLOCK_SIZE - 1;
@@ -124,9 +198,11 @@ namespace TIFGridProcessor {
                 }
 
                 std::vector<PointLBHd> points;
-                if (!readDEMBlockToPoints(poBand, adfGeoTransform, xOff, yOff, curWidth, curHeight, points)) continue;
+                if (!readDEMBlockToPoints(poBand, adfGeoTransform, xOff, yOff, curWidth, curHeight, points)) {
+                    throw std::runtime_error("读取 TIF 高程分块失败");
+                }
 
-                auto faces = buildTIN(points, curWidth, curHeight, config.noDataValue);
+                auto faces = buildTINInRegion(points, curWidth, curHeight, config.noDataValue, region);
 
                 // ✨ 立即强制释放散点内存
                 std::vector<PointLBHd>().swap(points);
@@ -140,15 +216,13 @@ namespace TIFGridProcessor {
 
                 for (const auto& code : localCodes) {
                     batchGridCodes.insert(code);
-                }
-
-                if (batchGridCodes.size() >= BATCH_LIMIT) {
-                    if (batchCallback) {
-                        batchCallback(std::vector<std::string>(batchGridCodes.begin(), batchGridCodes.end()));
+                    if (batchGridCodes.size() >= BATCH_LIMIT) {
+                        if (batchCallback) {
+                            batchCallback(std::vector<std::string>(batchGridCodes.begin(), batchGridCodes.end()));
+                        }
+                        totalGenerated += batchGridCodes.size();
+                        batchGridCodes.clear();
                     }
-                    totalGenerated += batchGridCodes.size();
-                    // ✨ 立即强制销毁哈希表，归还内存给操作系统
-                    std::unordered_set<std::string>().swap(batchGridCodes);
                 }
             }
         }
@@ -161,7 +235,6 @@ namespace TIFGridProcessor {
             std::unordered_set<std::string>().swap(batchGridCodes);
         }
 
-        GDALClose(poDataset);
         LOG_INFO << "TIF 算法提取完毕！累计生成网格: " << totalGenerated << " 个";
 
         return totalGenerated;

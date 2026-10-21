@@ -643,6 +643,22 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
             return;
         }
 
+        // 解析可选参数：多尺度网格聚合控制
+        bool aggregate = body->isMember("aggregate") && (*body)["aggregate"].asBool();
+        int minLevel = 1; // 默认最小聚合层级
+        if (body->isMember("minLevel")) {
+            minLevel = (*body)["minLevel"].asInt();
+            if (minLevel < 0 || minLevel > level) {
+                Json::Value err;
+                err["status"] = "error";
+                err["message"] = "minLevel 必须在 0 到 level 之间";
+                auto resp = HttpResponse::newHttpJsonResponse(err);
+                resp->setStatusCode(k400BadRequest);
+                callback(resp);
+                return;
+            }
+        }
+
         // 将JSON数组转换为坐标向量格式（符合getPolygonGrids函数要求）
         std::vector<std::vector<double>> polygonCoords;
         for (const auto &pt : polygonJs) {
@@ -685,6 +701,11 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
             resp->setStatusCode(k500InternalServerError);
             callback(resp);
             return;
+        }
+
+        // 若开启聚合，调用多尺度网格聚合函数
+        if (aggregate && !gridCodes.empty()) {
+            gridCodes = aggregateToMultiScaleCodes(gridCodes, minLevel);
         }
 
         // 获取每个网格的详细信息 (并行优化)
@@ -744,6 +765,7 @@ void geometricGrid::getGridByPolygonAndHeight(const HttpRequestPtr& req, std::fu
         for (const auto &g : gridDetails) {
             Json::Value item;
             item["code"] = g.code;            // 网格编码
+            item["level"] = static_cast<int>(g.code.length()); // 网格层级（多尺度下对应各自层级）
 
             // 构建center数组：[经度, 纬度, 高度]
             Json::Value center(Json::arrayValue);

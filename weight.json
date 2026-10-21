@@ -6,25 +6,26 @@
       "comm": 0.1, "nav": 0.1, "surv": 0.1,
       "wind": 0.05, "rain": 0.0, "vis": 0.0,
       "temp": 0.0, "hum": 0.0, "press": 0.0,
-      "em": 0.0, "riskArea": 0.1, "privacy": 0.0
+      "em": 0.0, "riskArea": 0.0, "privacy": 0.0
     },
     "safest": {
-      "distance": 1, "efficiency": 0.60,
+      "distance": 1, "efficiency": 1.2,
       "comm": 0.3, "nav": 0.1, "surv": 0.05,
       "wind": 0.4, "rain": 0.4, "vis": 0.4,
       "temp": 0.1, "hum": 0.4, "press": 0.2,
-      "em": 0.4, "riskArea": 1, "privacy": 0.15
+      "em": 0.4, "riskArea":2, "privacy": 0
     },
     "balanced": {
       "distance": 1, "efficiency": 0.40,
       "comm": 0.2, "nav": 0.1, "surv": 0.05,
       "wind": 0.2, "rain": 0.4, "vis": 0.3,
       "temp": 0.1, "hum": 0.4, "press": 0.1,
-      "em": 0.2, "riskArea": 0.8, "privacy": 0.1
+      "em": 0.2, "riskArea": 1, "privacy": 0.1
     }
   },
   "rules": {
     "dc": {
+      "threshold": "",//(<,>,||)
       "value": [
         {"range": "[-100,0]", "cost": 0, "description": "电磁环境良好，无干扰"},
         {"range": "(0,5]", "cost": 0.2, "description": "轻度干扰"},
@@ -34,24 +35,27 @@
       ]
     },
     "tx": {
+      "threshold": "",
       "value": [
         { "match": "0", "cost": 0.2, "description": "无通信" },
         { "match": "1", "cost": 0, "description": "有通信" }
       ]
     },
     "dh": {
+      "threshold": "",
       "value": [
         { "match": "0", "cost": 0.3, "description": "无导航" },
         { "match": "1", "cost": 0.0, "description": "有导航" }
       ]
     },
     "jk": {
+      "threshold": "",
       "value": [
         { "match": "0", "cost": 0.2, "description": "无监视" },
         { "match": "1", "cost": 0.0, "description": "有监视" }
       ]
     },
-    "fxq": {
+    "fxq_11": {
       "workday_low_risk_time": { "cost": 0.3, "description": "工作日低风险" },
       "workday_mid_risk_time": { "cost": 0.6, "description": "工作日中风险" },
       "workday_high_risk_time": { "cost": 1.0, "description": "工作日高风险" },

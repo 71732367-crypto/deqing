@@ -1,4 +1,6 @@
-# dqglib 函数接口文档
+ # dqglib 函数接口文档
+
+> **最后更新时间**：2026年9月16日
 
 ## 1. 库基本信息
 
@@ -263,7 +265,7 @@ uint64_t getDQGCellFatherBylevel_MTCode(uint64_t code, uint8_t level);
 ### 4.2 子网格查询
 
 #### `getChildCode`
-获取网格的所有子网格编码。
+获取局部三维立方网格的下一层级八个子网格编码，依次追加 `0` 到 `7`，保留前导零。
 
 **函数原型 (DQG3DBasic.h):**
 ```cpp
@@ -274,7 +276,11 @@ std::vector<std::string> getChildCode(const std::string& code);
 - `code` (const std::string&): 父网格编码
 
 **返回值:**
-- 子网格编码数组（通常8个子网格）
+- 子网格编码数组（固定 8 个，例如 `"123"` 返回 `"1230"` 到 `"1237"`）
+
+HTTP 接口 `POST /api/multiSource/basicGrid/getChildCode` 请求示例：`{"gridCode":"123"}`。
+父编码须为 1～20 位八进制字符串，也可传入合法的 `LGC1` 互操作编码；返回字段保持为 `data.gridCode` 和 `data.childcode`。
+非对象请求体、非字符串或非法编码，以及无法继续细分的 21 层父编码返回 HTTP 400。
 
 **调用示例:**
 ```cpp
@@ -297,6 +303,46 @@ void getChildCode(uint64_t code, code_data* childrencodes);
 
 **返回值:**
 - 无，通过childrencodes参数返回
+
+---
+
+### 4.3 多尺度网格编码聚合
+
+#### `aggregateToMultiScaleCodes` (unordered_set 重载)
+自底向上递归检查网格集合，若属于同一父节点的 8 个子网格全部存在，则将其聚合合并为一个父网格编码，直到无满足条件的 8 子格组合或到达指定的最小聚合层级 `minLevel`。
+
+**函数原型 (DQG3DBasic.h):**
+```cpp
+std::unordered_set<std::string> aggregateToMultiScaleCodes(
+    const std::unordered_set<std::string>& inputCodes,
+    int minLevel = 1);
+```
+
+**参数说明:**
+- `inputCodes` (const std::unordered_set<std::string>&): 输入的细粒度网格编码集合
+- `minLevel` (int): 最小聚合层级（编码长度小于等于此层级时不再向上合并），默认为 1
+
+**返回值:**
+- `std::unordered_set<std::string>`: 聚合后的多尺度混合网格编码集合（可显著压缩网格数量）
+
+---
+
+#### `aggregateToMultiScaleCodes` (vector 重载)
+向量输入版本的聚合函数。
+
+**函数原型 (DQG3DBasic.h):**
+```cpp
+std::vector<std::string> aggregateToMultiScaleCodes(
+    const std::vector<std::string>& inputCodes,
+    int minLevel = 1);
+```
+
+**参数说明:**
+- `inputCodes` (const std::vector<std::string>&): 输入的细粒度网格编码向量
+- `minLevel` (int): 最小聚合层级，默认为 1
+
+**返回值:**
+- `std::vector<std::string>`: 聚合后的多尺度混合网格编码向量
 
 ---
 
@@ -1269,6 +1315,48 @@ std::string rchToCode(const IJH& obj, uint8_t level);
 
 ---
 
+#### `toInteropLocalCode`
+生成带互操作协议标识的标准局部网格编码。
+
+**函数原型 (DQG3DBasic.h):**
+```cpp
+std::string toInteropLocalCode(const std::string& localCode, uint8_t level);
+```
+
+**格式说明:**
+- 输出格式：`LGC1:{regionId}:{level}:{localCode}`（例如：`LGC1:deqing:14:14-10243048`）
+
+**参数说明:**
+- `localCode` (const std::string&): 原生局部网格编码
+- `level` (uint8_t): 网格剖分层级
+
+**返回值:**
+- 具备跨系统互操作标识的编码字符串
+
+---
+
+#### `parseInteropLocalCode`
+解析并校验互操作局部网格编码。
+
+**函数原型 (DQG3DBasic.h):**
+```cpp
+bool parseInteropLocalCode(const std::string& interopCode,
+                           std::string& localCode,
+                           uint8_t& level,
+                           std::string& error);
+```
+
+**参数说明:**
+- `interopCode` (const std::string&): 输入的待校验互操作编码
+- `localCode` (std::string&): 输出参数，解析出的原生局部编码
+- `level` (uint8_t&): 输出参数，解析出的层级
+- `error` (std::string&): 输出参数，若解析失败记录具体错误原因
+
+**返回值:**
+- `bool`: `true` 表示校验成功且区域标识匹配；`false` 表示格式错误或区域不匹配
+
+---
+
 ## 11. 相邻网格查询函数
 
 ### 11.1 面相邻
@@ -2130,7 +2218,12 @@ IJH LBH2IJH(double l, double b, double hei, uint8_t level);
 
 ## 19. 版本变更记录
 
-### Version 1.0 (当前版本)
+### Version 1.1 (最新更新)
+- **多尺度网格聚合**：新增 `aggregateToMultiScaleCodes`，支持 8 进制子网格向父网格递归归纳合并。
+- **互操作编码**：新增 `toInteropLocalCode` 与 `parseInteropLocalCode`，规范 `LGC1:{regionId}:{level}:{localCode}` 格式。
+- **DDA穿线优化**：3D DDA 线网格化动态步数安全上限采用曼哈顿距离动态自适应计算，解决长线段被截断问题。
+
+### Version 1.0
 - 初始版本
 - 支持2D/3D DQG网格编码/解码
 - 支持线、多边形、三角形网格化

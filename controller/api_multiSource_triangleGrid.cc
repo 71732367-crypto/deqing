@@ -21,8 +21,9 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
-#include <regex>
-
+#include <charconv>
+#include <cctype>
+#include <map>
 
 
 using namespace api::multiSource;
@@ -38,9 +39,9 @@ using namespace api::multiSource;
  * @param updateContent 更新内容描述
  * @return 是否成功插入日志
  */
-bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient, 
-                     const std::string& moduleCode, 
-                     const std::string& moduleName, 
+bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
+                     const std::string& moduleCode,
+                     const std::string& moduleName,
                      const std::string& updateContent) {
     try {
         // 检查并创建 update_log 表（如果不存在）
@@ -48,7 +49,7 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
             std::string checkTableSql = "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'update_log')";
             auto result = dbClient->execSqlSync(checkTableSql);
             bool tableExists = result[0]["exists"].as<bool>();
-            
+
             if (!tableExists) {
                 // 创建 update_log 表
                 try {
@@ -56,9 +57,9 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
                     std::string createSeqSql = "CREATE SEQUENCE IF NOT EXISTS update_log_id_seq "
                                                 "START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1";
                     dbClient->execSqlSync(createSeqSql);
-                    
+
                     // 创建表
-                    std::string createTableSql = 
+                    std::string createTableSql =
                         "CREATE TABLE \"public\".\"update_log\" ("
                         "\"id\" int8 NOT NULL DEFAULT nextval('update_log_id_seq'::regclass),"
                         "\"module_code\" varchar(100) COLLATE \"pg_catalog\".\"default\" NOT NULL,"
@@ -68,26 +69,26 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
                         "\"update_time\" timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP"
                         ")";
                     dbClient->execSqlSync(createTableSql);
-                    
+
                     // 创建索引
-                    std::string createIndex1Sql = 
+                    std::string createIndex1Sql =
                         "CREATE INDEX \"idx_update_log_module_time\" ON \"public\".\"update_log\" USING btree ("
                         "\"module_code\" COLLATE \"pg_catalog\".\"default\" \"pg_catalog\".\"text_ops\" ASC NULLS LAST,"
                         "\"create_time\" \"pg_catalog\".\"timestamp_ops\" DESC NULLS FIRST"
                         ")";
                     dbClient->execSqlSync(createIndex1Sql);
-                    
-                    std::string createIndex2Sql = 
+
+                    std::string createIndex2Sql =
                         "CREATE INDEX \"idx_update_log_update_time\" ON \"public\".\"update_log\" USING btree ("
                         "\"module_code\" COLLATE \"pg_catalog\".\"default\" \"pg_catalog\".\"text_ops\" ASC NULLS LAST,"
                         "\"update_time\" \"pg_catalog\".\"timestamp_ops\" DESC NULLS FIRST"
                         ")";
                     dbClient->execSqlSync(createIndex2Sql);
-                    
+
                     // 设置主键
                     std::string createPkSql = "ALTER TABLE \"public\".\"update_log\" ADD CONSTRAINT \"update_log_pkey\" PRIMARY KEY (\"id\")";
                     dbClient->execSqlSync(createPkSql);
-                    
+
                     LOG_INFO << "成功创建 update_log 表";
                 } catch (const drogon::orm::DrogonDbException &e) {
                     LOG_ERROR << "创建 update_log 表过程中出错: " << e.base().what();
@@ -99,7 +100,7 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
             LOG_ERROR << "检查或创建 update_log 表失败: " << e.base().what();
             // 继续尝试插入，可能表已经存在但检查失败
         }
-        
+
         std::string sql = "INSERT INTO update_log (module_code, module_name, update_content, create_time, update_time) "
                          "VALUES ($1, $2, $3, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai', CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')";
         dbClient->execSqlSync(sql, moduleCode, moduleName, updateContent);
@@ -254,27 +255,15 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         std::vector<std::string> chunks;
         std::filesystem::path rootPath(folder);
 
-        // 定义目录名称匹配函数，识别常见的OSGB数据块目录命名模式
-        // 支持的模式: Block_+000_+000, Tile_+000_+000, ATile_+000_+000
-        const auto isValidChunkDir = [](const std::string& dirName) -> bool {
-            // 匹配模式: 前缀(字母或字母组合) + 下划线 + +/-数字 + 下划线 + +/-数字
-            // 例如: Block_+000_+000, Tile_+001_-002, ATile_+011_+004
-            std::regex pattern(R"(^[A-Za-z]+_[+-]\d+_[+-]\d+$)");
-            return std::regex_match(dirName, pattern);
-        };
-
         try {
             bool hasSubDirs = false;
             if (std::filesystem::exists(rootPath) && std::filesystem::is_directory(rootPath)) {
                 for (const auto& entry : std::filesystem::directory_iterator(rootPath)) {
                     if (entry.is_directory()) {
-                        std::string dirName = entry.path().filename().string();
-                        // 检查是否是有效的OSGB数据块目录
-                        if (isValidChunkDir(dirName)) {
-                            chunks.push_back(entry.path().string());
-                            hasSubDirs = true;
-                            LOG_INFO << "识别到有效分块目录: " << dirName;
-                        }
+                        // 不限制分块目录名称
+                        chunks.push_back(entry.path().string());
+                        hasSubDirs = true;
+                        LOG_INFO << "识别到分块目录: " << entry.path().filename().string();
                     }
                 }
             }
@@ -324,22 +313,89 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             // 处理当前分块 - 使用独立的变量确保内存隔离
             std::vector<Triangle> triangles;
             {
-                // 并行提取两个层级的三角形数据
-                auto future20 = std::async(std::launch::async, [&chunkFolder]() {
-                    std::vector<Triangle> t;
-                    extractTrianglesFromLevelFiles(chunkFolder, 20, t);
-                    return t;
-                });
-                auto future21 = std::async(std::launch::async, [&chunkFolder]() {
-                    std::vector<Triangle> t;
-                    extractTrianglesFromLevelFiles(chunkFolder, 21, t);
-                    return t;
-                });
-                std::vector<Triangle> t20 = future20.get();
-                std::vector<Triangle> t21 = future21.get();
-                triangles.reserve(t20.size() + t21.size());
-                triangles.insert(triangles.end(), std::make_move_iterator(t20.begin()), std::make_move_iterator(t20.end()));
-                triangles.insert(triangles.end(), std::make_move_iterator(t21.begin()), std::make_move_iterator(t21.end()));
+                std::map<int, std::vector<std::filesystem::path>> levelFiles;
+                std::vector<std::filesystem::path> unlevelledFiles;
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(chunkFolder)) {
+                    if (!entry.is_regular_file()) continue;
+                    std::string name = entry.path().filename().string();
+                    std::transform(name.begin(), name.end(), name.begin(),
+                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (!name.ends_with(".osgb")) continue;
+                    bool hasLevel=false;
+                    for (size_t pos = name.find("_l"); pos != std::string::npos;
+                        pos=name.find("_l",pos+2))
+                    {
+                        size_t end = pos + 2;
+                        while (end<name.size()&&std::isdigit(static_cast<unsigned char>(name[end])))end++;
+                        if (end==pos+2||name[end]!='_'&&name[end]!='.') continue;
+                        int osgbLevel=0;
+                        auto [ptr, error] = std::from_chars(name.data() + pos + 2, name.data() + end, osgbLevel);
+                        if (error == std::errc{} && ptr == name.data() + end) {
+                            levelFiles[osgbLevel].push_back(entry.path());
+                            hasLevel = true;
+                            break;
+                        }
+                    }
+                    if (!hasLevel) unlevelledFiles.push_back(entry.path());
+                }
+                std::vector<std::vector<std::filesystem::path>> selectedFiles;
+                for (int preferredLevel : {20, 21}) {
+                    auto it = levelFiles.find(preferredLevel);
+                    if (it != levelFiles.end()) {
+                        LOG_INFO << "将提取 OSGB 模型层级 L" << preferredLevel
+                                 << "，文件数: " << it->second.size();
+                        selectedFiles.push_back(std::move(it->second));
+                    }
+                }
+
+                if (selectedFiles.empty()) {
+                    for (auto it = levelFiles.rbegin();
+                         it != levelFiles.rend() && selectedFiles.size() < 2; ++it) {
+                        LOG_INFO << "将提取 OSGB 模型层级 L" << it->first
+                                 << "，文件数: " << it->second.size();
+                        selectedFiles.push_back(std::move(it->second));
+                         }
+                }
+
+                if (selectedFiles.empty() && !unlevelledFiles.empty()) {
+                    LOG_INFO << "未发现 L 层级文件，将提取普通 OSGB 文件，数量: "
+                             << unlevelledFiles.size();
+                    selectedFiles.push_back(std::move(unlevelledFiles));
+                }
+
+                // 每个选中层级独立提取，按分块内已处理文件数输出总进度。
+                size_t totalFiles = 0;
+                for (const auto& files : selectedFiles) {
+                    totalFiles += files.size();
+                }
+                std::atomic<size_t> completedFiles{0};
+                LOG_INFO << "开始提取 OSGB 文件，总数: " << totalFiles;
+
+                std::vector<std::future<std::vector<Triangle>>> futures;
+                for (const auto& files : selectedFiles) {
+                    futures.push_back(std::async(std::launch::async, [files, &completedFiles, totalFiles]() {
+                        std::vector<Triangle> result;
+                        for (const auto& file : files) {
+                            osg::ref_ptr<osg::Node> node = osgDB::readNodeFile(file.string());
+                            if (node) extractTriangles(node.get(), result);
+                            else LOG_WARN << "加载 OSGB 文件失败: " << file.string();
+
+                            const size_t done = completedFiles.fetch_add(1, std::memory_order_relaxed) + 1;
+                            if (done == 1 || done % 800 == 0 || done == totalFiles) {
+                                LOG_INFO << "OSGB 文件处理进度: " << done << "/" << totalFiles
+                                         << " (" << static_cast<int>(100.0 * done / totalFiles) << "%)";
+                            }
+                        }
+                        return result;
+                    }));
+                }
+
+                for (auto& future : futures) {
+                    auto extracted = future.get();
+                    triangles.insert(triangles.end(), std::make_move_iterator(extracted.begin()),
+                                     std::make_move_iterator(extracted.end()));
+                }
+
             }
 
             if (triangles.empty()) {
@@ -381,20 +437,20 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                         if (std::isnan(t.vertex1.Lng) || std::isnan(t.vertex1.Lat) || std::isnan(t.vertex1.Hgt) ||
                             std::isnan(t.vertex2.Lng) || std::isnan(t.vertex2.Lat) || std::isnan(t.vertex2.Hgt) ||
                             std::isnan(t.vertex3.Lng) || std::isnan(t.vertex3.Lat) || std::isnan(t.vertex3.Hgt)) continue;
-                        
+
                         // 过滤边界外的三角形，防止转换局部坐标时发生无符号整型下溢。
                         // 这里只检查 2D 经纬度边界，不检查高度 (Hgt)，因为 region.json 往往没有配置高度，默认 top 会极小导致误杀。
                         auto isOutside = [&](const PointLBHd& p) {
                             return p.Lng < baseTile.west || p.Lng > baseTile.east ||
                                    p.Lat < baseTile.south || p.Lat > baseTile.north;
                         };
-                        
+
                         // 只要有任何一个顶点在基准瓦片边界外，就过滤掉（避免映射到uint32_t时下溢为极大值）
                         if (isOutside(t.vertex1) || isOutside(t.vertex2) || isOutside(t.vertex3)) {
                             localDiscarded++;
                             continue;
                         }
-                        
+
                         try {
                             IJH p1 = localRowColHeiNumber(gridLevelUint, t.vertex1.Lng, t.vertex1.Lat, t.vertex1.Hgt, baseTile);
                             IJH p2 = localRowColHeiNumber(gridLevelUint, t.vertex2.Lng, t.vertex2.Lat, t.vertex2.Hgt, baseTile);
@@ -504,12 +560,22 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                                     ", 目标表: " + tableName;
         insertUpdateLog(dbClient, "6", "实景三维数据网格化", completeContent);
 
+        if (totalTrianglesProcessed.load() == 0)
+        {
+            Json::Value err;
+            err["status"] = "error";
+            err["message"] = "未识别到有效的 OSGB 模型文件或未提取到三角形面片数据，请检查目录与数据";
+            auto resp = HttpResponse::newHttpJsonResponse(err);
+            resp->setStatusCode(k400BadRequest);
+            callback(resp);
+            return;
+        }
+
         Json::Value res;
         res["status"] = "success";
         res["data"]["total_triangles_processed"] = static_cast<Json::UInt64>(totalTrianglesProcessed.load());
         res["data"]["total_grid_count"] = static_cast<Json::UInt64>(totalGridCount.load());
         res["data"]["total_discarded_triangles"] = static_cast<Json::UInt64>(totalDiscardedTriangles.load());
-        res["data"]["discard_reason"] = "total_discarded_triangles为部分三角形顶点坐标超出了region.json边界或数据异常而被丢弃的数量。";
         res["data"]["message"] = "处理完成，数据已存入数据库";
         // 移除 cells 字段，避免内存溢出
 
