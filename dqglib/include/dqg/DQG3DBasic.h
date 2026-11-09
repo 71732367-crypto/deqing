@@ -60,7 +60,7 @@ inline double haversineDistance(const PointLBHd& p1, const PointLBHd& p2) {
         cos(toRadians(p1.Lat)) * cos(toRadians(p2.Lat)) * sin(dLng / 2) * sin(dLng / 2);
     double c = 2 * atan2(sqrt(a), sqrt(1 - a));
 
-    return WGS84a * c;
+    return CGCS2000a * c;
 }
 
 /// @brief 计算二维平面上两点间的欧几里得距离

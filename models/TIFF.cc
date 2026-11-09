@@ -2,6 +2,7 @@
 #include "TIFF.h"
 #include <drogon/drogon.h>
 #include <cmath>
+#include <gdal/ogr_spatialref.h>
 //单实例，避免重复读取庞大的 TIFF 文件浪费内存。
 TiffReader& TiffReader::getInstance() {
     static TiffReader instance;
@@ -38,6 +39,24 @@ bool TiffReader::init(const std::string& filePath) {
         return false;
     }
 
+    // 仅转换水平位置：CGCS2000 经纬度 -> TIFF 源 CRS，不转换高程。
+    const OGRSpatialReference* sourceSrs = dataset->GetSpatialRef();
+    OGRSpatialReference inputSrs;
+    if (sourceSrs && inputSrs.importFromEPSG(4490) == OGRERR_NONE) {
+        OGRSpatialReference rasterSrs(*sourceSrs);
+        if (rasterSrs.StripVertical() == OGRERR_NONE) {
+            inputSrs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+            rasterSrs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+            coordinateTransform = OGRCreateCoordinateTransformation(&inputSrs, &rasterSrs);
+        }
+    }
+    if (!coordinateTransform) {
+        LOG_ERROR << "无法创建 CGCS2000 到 TIFF 源坐标系的转换";
+        GDALClose((GDALDatasetH)dataset);
+        dataset = nullptr;
+        return false;
+    }
+
     // 默认读取第 1 个波段（高程波段）
     rasterBand = dataset->GetRasterBand(1);
     rasterXSize = dataset->GetRasterXSize();
@@ -50,6 +69,8 @@ bool TiffReader::init(const std::string& filePath) {
 float TiffReader::getElevation(double lon, double lat) {
     std::lock_guard<std::mutex> lock(mtx);
     if (!rasterBand) return INVALID_ELEVATION; // [修改] 未初始化时返回无效值
+    if (!coordinateTransform->Transform(1, &lon, &lat) ||
+        !std::isfinite(lon) || !std::isfinite(lat)) return INVALID_ELEVATION;
 
     double pixel_d = invGeoTransform[0] + invGeoTransform[1] * lon + invGeoTransform[2] * lat;
     double line_d = invGeoTransform[3] + invGeoTransform[4] * lon + invGeoTransform[5] * lat;
@@ -79,6 +100,9 @@ float TiffReader::getElevation(double lon, double lat) {
 }
 
 TiffReader::~TiffReader() {
+    if (coordinateTransform) {
+        OGRCoordinateTransformation::DestroyCT(coordinateTransform);
+    }
     if (dataset) {
         GDALClose((GDALDatasetH)dataset);
     }

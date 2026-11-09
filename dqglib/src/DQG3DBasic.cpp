@@ -457,18 +457,16 @@ vector<PointLBd> boundingSquare(const PointLBd& A, const PointLBd& B, const Poin
 }
 
 /*
-    计算球面上格网面积（WGS84椭球/任意椭球）
+    计算 CGCS2000 椭球上的经纬网格面积（平方米）
     输入参数：第一个点的经度、纬度，第二个点的经度、纬度
     输出参数：格网面积 （m^2）
 */
+/// 显式椭球参数重载供默认 CGCS2000 面积计算复用。
+double CalculatingGridArea(double longitude1, double latitude1, double longitude2,
+    double latitude2, double a, double b);
+
 double CalculatingGridArea(double longitude1, double latitude1, double longitude2, double latitude2) {
-    double centerLatitude = (latitude1 + latitude2) * 0.5 * RegToRad;
-    double intervalLatitude = latitude2 > latitude1 ? (latitude2 - latitude1) * RegToRad : (latitude1 - latitude2) * RegToRad;
-    double intervalLongitude = (longitude2 > longitude1) ? (longitude2 - longitude1) * RegToRad : (longitude1 - longitude2) * RegToRad;
-    double S = 2.0 * WGS84b * WGS84b * intervalLongitude * (WGS84b1 * sin(0.5 * intervalLatitude) * cos(centerLatitude)
-        - WGS84b3 * sin(1.5 * intervalLatitude) * cos(3 * centerLatitude) + WGS84b5 * sin(2.5 * intervalLatitude) * cos(5 * centerLatitude)
-        - WGS84b7 * sin(3.5 * intervalLatitude) * cos(7 * centerLatitude) + WGS84b9 * sin(4.5 * intervalLatitude) * cos(9 * centerLatitude));
-    return S;
+    return CalculatingGridArea(longitude1, latitude1, longitude2, latitude2, CGCS2000a, CGCS2000b);
 }
 
 double CalculatingGridArea(double longitude1, double latitude1, double longitude2, double latitude2, double a, double b) {
@@ -547,11 +545,11 @@ PointLBHd movePoint(const PointLBHd& p, double distance, double angle) {
     double radLng = p.Lng * PI / 180.0;
     double radAngle = angle * PI / 180.0;
 
-    double newLat = asin(sin(radLat) * cos(distance / WGS84a) +
-        cos(radLat) * sin(distance / WGS84a) * cos(radAngle));
+    double newLat = asin(sin(radLat) * cos(distance / CGCS2000a) +
+        cos(radLat) * sin(distance / CGCS2000a) * cos(radAngle));
 
-    double newLng = radLng + atan2(sin(radAngle) * sin(distance / WGS84a) * cos(radLat),
-        cos(distance / WGS84a) - sin(radLat) * sin(newLat));
+    double newLng = radLng + atan2(sin(radAngle) * sin(distance / CGCS2000a) * cos(radLat),
+        cos(distance / CGCS2000a) - sin(radLat) * sin(newLat));
 
     return { newLng * 180.0 / PI, newLat * 180.0 / PI };
 }

@@ -14,6 +14,8 @@
 #include <string>
 #include <mutex>
 
+class OGRCoordinateTransformation;
+
 class TiffReader {
 public:
     // [新增] 定义一个统一的无效高程标识值
@@ -21,6 +23,7 @@ public:
 
     static TiffReader& getInstance();
     bool init(const std::string& filePath);
+    /// 输入 CGCS2000 经纬度（经度在前），返回 TIFF 原始高程值。
     float getElevation(double lon, double lat);
     ~TiffReader();
 
@@ -32,6 +35,7 @@ private:
 
     GDALDataset* dataset = nullptr;
     GDALRasterBand* rasterBand = nullptr;
+    OGRCoordinateTransformation* coordinateTransform = nullptr;
 
     double geoTransform[6] = {0};
     double invGeoTransform[6] = {0};

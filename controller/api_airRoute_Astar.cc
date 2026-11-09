@@ -1311,6 +1311,39 @@ Task<AStarResult> aStarPath(
         co_return AStarResult{false, {}, "终点真高不在15至120米范围"};
     }
 
+    if (evaluator) {
+        auto startNorm = normalizeGridTime(startTime, validation.referenceTime);
+        CandidateInfo startCand = { startCode, static_cast<int>(startTime), startNorm.wdTime, startNorm.wdRule, true };
+        CandidateInfo endCand = { endCode, 0, 0, "", false };
+
+        std::vector<CandidateInfo> preCheckCands = {startCand, endCand};
+        auto preCheckResultsPtr = co_await GridCheckAwaiter{evaluator, preCheckCands};
+
+        if (preCheckResultsPtr->count(startCode)) {
+            const auto& res = preCheckResultsPtr->at(startCode);
+            if (!res.pass) {
+                co_return {false, {}, "起点不可通行: " + res.reason};
+            }
+        }
+
+        if (preCheckResultsPtr->count(endCode)) {
+            const auto& res = preCheckResultsPtr->at(endCode);
+            if (!res.pass) {
+                co_return {false, {}, "终点不可通行: " + res.reason};
+            }
+        }
+    }
+
+    const LatLonHei startCoordinate = getLocalTileLatLon(startCode, baseTile);
+    if (pointInAnyObstacle2D(startCoordinate.longitude, startCoordinate.latitude, obstacles)) {
+        co_return AStarResult{false, {}, "起点不可通行: 位于当前算路模式禁止通行的区域"};
+    }
+
+    const LatLonHei endCoordinate = getLocalTileLatLon(endCode, baseTile);
+    if (pointInAnyObstacle2D(endCoordinate.longitude, endCoordinate.latitude, obstacles)) {
+        co_return AStarResult{false, {}, "终点不可通行: 位于当前算路模式禁止通行的区域"};
+    }
+
     // ==========================================
     // 2. A* 主循环 (引入运动学约束与终点特权)
     // ==========================================
@@ -1878,15 +1911,45 @@ Task<AStarResult> thinPathGreedy(
         if (!isUnconstrained) {
             gridEvaluator = GridEvaluator::create(ruleOptions);
         }
-        LOG_INFO << "[A*] 开始数据库可见图绕行预处理";
-        std::vector<VectorObstacle> thinningObstacles;
-        insertDatabaseVisibilityWaypoints(
-            waypoints, level, baseTile, currentMode, startTime,
-            thinningObstacles);
         RouteValidationContext validation;
         double cruiseStartTime = startTime;
         for (size_t index = 0; index + 1 < verticalPath.size(); ++index) {
             cruiseStartTime += gridDistanceMeters(verticalPath[index], verticalPath[index + 1], level) / speed;
+        }
+
+        // 先校验全部前端点，避免绕行和分段搜索之后才发现终点或必经点禁行。
+        if (gridEvaluator) {
+            std::vector<CandidateInfo> preCheckCands;
+            preCheckCands.reserve(waypoints.size());
+            const auto startNorm = normalizeGridTime(cruiseStartTime, validation.referenceTime);
+            for (size_t i = 0; i < waypoints.size(); ++i) {
+                const auto& grid = waypoints[i].grid;
+                const std::string code = rchToCode(
+                    {static_cast<uint32_t>(grid[1]), static_cast<uint32_t>(grid[0]),
+                     static_cast<uint32_t>(grid[2])}, static_cast<uint8_t>(level));
+                preCheckCands.push_back(i == 0
+                    ? CandidateInfo{code, static_cast<int>(cruiseStartTime), startNorm.wdTime, startNorm.wdRule, true}
+                    : CandidateInfo{code, 0, 0, "", false});
+            }
+            const auto preCheckResultsPtr = co_await GridCheckAwaiter{gridEvaluator, preCheckCands};
+            for (size_t i = 0; i < preCheckCands.size(); ++i) {
+                const auto result = preCheckResultsPtr->find(preCheckCands[i].code);
+                if (result != preCheckResultsPtr->end() && !result->second.pass) {
+                    pathSuccess = false;
+                    const std::string pointName = i == 0 ? "起点" :
+                        i + 1 == preCheckCands.size() ? "终点" : "第" + std::to_string(i + 1) + "个输入点";
+                    failReason = pointName + "不可通行: " + result->second.reason;
+                    break;
+                }
+            }
+        }
+
+        std::vector<VectorObstacle> thinningObstacles;
+        if (pathSuccess) {
+            LOG_INFO << "[A*] 开始数据库可见图绕行预处理";
+            insertDatabaseVisibilityWaypoints(
+                waypoints, level, baseTile, currentMode, startTime,
+                thinningObstacles);
         }
         double currentSegmentStartTime = cruiseStartTime;
 

@@ -23,6 +23,7 @@
 #include <gdal/gdal_priv.h>
 #include <gdal/cpl_conv.h>
 #include <gdal/cpl_port.h>
+#include <gdal/ogr_spatialref.h>
 
 namespace TIFGridProcessor {
 
@@ -77,6 +78,20 @@ namespace TIFGridProcessor {
                               int xOff, int yOff, int xSize, int ySize,
                               std::vector<PointLBHd>& outPoints) {
 
+        // 仿射变换输出源 CRS 坐标；仅转换水平位置，高程仍取原波段值。
+        GDALDataset* dataset = poBand->GetDataset();
+        const OGRSpatialReference* source = dataset ? dataset->GetSpatialRef() : nullptr;
+        if (!source) return false;
+        OGRSpatialReference sourceSrs(*source), targetSrs;
+        if (sourceSrs.StripVertical() != OGRERR_NONE ||
+            targetSrs.importFromEPSG(4490) != OGRERR_NONE) return false;
+        sourceSrs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+        targetSrs.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+        std::unique_ptr<OGRCoordinateTransformation, decltype(&OGRCoordinateTransformation::DestroyCT)>
+            transform(OGRCreateCoordinateTransformation(&sourceSrs, &targetSrs),
+                OGRCoordinateTransformation::DestroyCT);
+        if (!transform) return false;
+
         outPoints.resize(xSize * ySize);
         std::vector<float> scanline(xSize);
 
@@ -92,6 +107,7 @@ namespace TIFGridProcessor {
                 double lat = adfGeoTransform[3] + (globalCol + 0.5) * adfGeoTransform[4] + (globalRow + 0.5) * adfGeoTransform[5];
                 double hgt = static_cast<double>(scanline[col]);
 
+                if (!transform->Transform(1, &lon, &lat)) return false;
                 outPoints[row * xSize + col] = {lon, lat, hgt};
             }
         }

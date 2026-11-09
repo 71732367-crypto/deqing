@@ -31,6 +31,7 @@ namespace TIFGridProcessor {
         std::function<void(const std::vector<std::string>&)> batchCallback = nullptr
     );
 
+    /// 输出 CGCS2000 经纬度并保留高程/NoData；读取、源 CRS 或坐标转换失败时返回 false。
     bool readDEMBlockToPoints(GDALRasterBand* poBand, double* adfGeoTransform, int xOff, int yOff, int xSize, int ySize, std::vector<PointLBHd>& outPoints);
     std::vector<Triangle> buildTIN(const std::vector<PointLBHd>& points, int width, int height, double noDataValue);
 

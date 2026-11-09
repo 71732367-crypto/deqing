@@ -92,9 +92,9 @@ public:
         }
 
         const std::string target = "EPSG:" + std::to_string(targetSrid);
-        PJ* raw = proj_create_crs_to_crs(context_, "EPSG:4326", target.c_str(), nullptr);
+        PJ* raw = proj_create_crs_to_crs(context_, "EPSG:4490", target.c_str(), nullptr);
         if (!raw) {
-            throw std::runtime_error("无法创建WGS84到活动图坐标系的转换");
+            throw std::runtime_error("无法创建CGCS2000到活动图坐标系的转换");
         }
 
         transform_ = proj_normalize_for_visualization(context_, raw);
@@ -135,7 +135,7 @@ double distance(double ax, double ay, double bx, double by) {
 struct VisibilityGraphPlanner::GraphData {
     long long graphId = 0;
     long long graphVersion = 0;
-    int srid = 4326;
+    int srid = 4490;
     std::vector<CandidateNode> candidates;
     std::vector<std::vector<GraphEdge>> adjacency;
 };

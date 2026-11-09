@@ -319,8 +319,10 @@ GridEvaluator::GridEvaluator(const Json::Value& options) {
         int level = 0;
         try { level = stoi(levelStr); } catch(...) { continue; } // 转换级别为整数
 
-        // 获取或创建该前缀对应的规则组
-        auto& group = activeRulesMap_[prefix];
+        // 这四类硬约束按完整键保留各层级，其余类型维持原有分组方式。
+        const bool multiLevel = prefix == "gd" || prefix == "dz" ||
+                                prefix == "ad" || prefix == "hlz";
+        auto& group = activeRulesMap_[multiLevel ? key : prefix];
         group.level = level;
 
         // 标记是否匹配到预定义规则
@@ -555,7 +557,9 @@ struct AsyncContext {
                 double curEm = 0.0, curRisk = 0.0, curPrivacy = 0.0;
 
                 // 遍历所有激活的规则组（快递包裹）
-                for (const auto& [prefix, group] : evaluator->activeRulesMap_) {
+                for (const auto& [groupKey, group] : evaluator->activeRulesMap_) {
+                    if (group.rules.empty()) continue;
+                    const auto& prefix = group.rules.front().prefix;
 
                     // [时间规则过滤] 如果不检查时间规则，跳过相关规则
                     if (!cand.checkTimeRules && (prefix == "dt" || prefix == "wdd" || prefix == "wdh")) continue;
@@ -858,7 +862,9 @@ void GridEvaluator::checkCandidates(
         for (const auto& cand : candidates) {
 
             // 遍历所有激活的规则组
-            for (const auto& [prefix, group] : activeRulesMap_) {
+            for (const auto& [groupKey, group] : activeRulesMap_) {
+                if (group.rules.empty()) continue;
+                const auto& prefix = group.rules.front().prefix;
 
                 if (!cand.checkTimeRules && (prefix == "dt" || prefix == "wdd" || prefix == "wdh")) {
                     continue;

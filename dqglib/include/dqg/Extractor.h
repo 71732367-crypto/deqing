@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <atomic>
 
 #include <osg/Geometry>
 #include <osg/LOD>
@@ -31,13 +32,15 @@ struct Vertex {
     Vertex(double lon, double lat, double alt) : lon(lon), lat(lat), alt(alt) {}
 };
 
+/// doneCount 可选，每完成一个三角形的三个顶点转换后加一；调用期间须保持有效。
 void convertCoordinates(vector<Triangle>& triangles,
 
     ////以下为德清数据
     const string& sourceCRS = "EPSG:4528",
-    const string& targetCRS = "EPSG:4326",
+    const string& targetCRS = "EPSG:4490",
     //double offsetX = 0.0, double offsetY = 0.0);
-    double offsetX= 40497564.61263241, double offsetY= 3377677.966467825,double offsetZ = 53.29796380422264);
+    double offsetX= 40497564.61263241, double offsetY= 3377677.966467825,double offsetZ = 53.29796380422264,
+    std::atomic<size_t>* doneCount = nullptr);
 
 
 ////以下为香港数据
@@ -77,7 +80,8 @@ CoordinateOffset readCoordinateOffsetFromXML(const std::string& dataDir);
 // 从数据目录自动读取坐标系和偏移量的版本
 void convertCoordinatesFromXML(vector<Triangle>& triangles,
     const std::string& dataDir,
-    const string& targetCRS = "EPSG:4326");
+    const string& targetCRS = "EPSG:4490",
+    std::atomic<size_t>* doneCount = nullptr);
 
 //三角面片立体模型填充网格计算结果结构体
 struct PolyhedronGridResult {
@@ -112,7 +116,7 @@ struct PolyhedronGridResult {
  * @param maxSamples 最大采样数，0表示无限制，用于内存控制
  * @return PolyhedronGridResult 包含所有相交网格编码的集合及采样统计信息
  *
- * @note 输入坐标应为经纬度坐标系（WGS84/EPSG:4326）
+ * @note 输入坐标应为经纬度坐标系（CGCS2000/EPSG:4490）
  */
 PolyhedronGridResult computePolyhedronGridFill(
     const std::vector<std::array<PointLBHd, 3>>& faces,

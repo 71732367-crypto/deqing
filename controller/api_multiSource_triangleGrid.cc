@@ -24,10 +24,277 @@
 #include <charconv>
 #include <cctype>
 #include <map>
+#include <stdexcept>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <iomanip>
+#include <ctime>
+#include <locale>
+#include <syncstream>
+#include <memory>
+#include <sstream>
 
 
 using namespace api::multiSource;
 
+namespace {
+
+/// 使用 UTC 加八小时生成北京时间，不依赖服务进程或操作系统的时区配置。
+std::string osgbBeijingTime() {
+    const std::time_t beijing = std::time(nullptr) + 8 * 60 * 60;
+    std::tm calendar{};
+#ifdef _WIN32
+    gmtime_s(&calendar, &beijing);
+#else
+    gmtime_r(&beijing, &calendar);
+#endif
+    std::ostringstream formatted;
+    formatted << std::put_time(&calendar, "%Y-%m-%d %H:%M:%S");
+    return formatted.str();
+}
+
+std::string osgbPercentText(double percent) {
+    std::ostringstream text;
+    text.imbue(std::locale::classic());
+    text << std::fixed << std::setprecision(2) << percent << '%';
+    return text.str();
+}
+
+/// 计数只更新原子变量；独立线程负责每秒终端刷新、阶段即时写入与每30秒定时采样。
+class OsgbProgressReporter {
+    struct Snapshot {
+        size_t completedChunks;
+        double percent;
+        std::string message;
+    };
+
+public:
+    OsgbProgressReporter(const drogon::orm::DbClientPtr& sourceClient, int level, size_t totalChunks)
+        : db_(drogon::orm::DbClient::newPgClient(sourceClient->connectionInfo(), 1)),
+          taskId_(drogon::utils::getUuid()), level_(level), totalChunks_(totalChunks) {
+        db_->setTimeout(5.0);
+        {
+            static std::mutex tableMutex;
+            std::lock_guard<std::mutex> lock(tableMutex);
+            db_->execSqlSync(
+                "CREATE TABLE IF NOT EXISTS public.update_progress ("
+                "id BIGSERIAL PRIMARY KEY, task_id VARCHAR(36) NOT NULL, grid_level INTEGER NOT NULL, "
+                "status VARCHAR(16) NOT NULL, progress_content TEXT NOT NULL, "
+                "completed_chunks BIGINT NOT NULL, total_chunks BIGINT NOT NULL, "
+                "create_time TIMESTAMP NOT NULL, message TEXT NOT NULL DEFAULT '')");
+            db_->execSqlSync(
+                "CREATE INDEX IF NOT EXISTS idx_update_progress_task_time "
+                "ON public.update_progress (task_id, create_time DESC, id DESC)");
+        }
+        const auto initial = snapshot();
+        print(initial, "running");
+        if (!write(initial)) {
+            throw std::runtime_error("无法写入 OSGB 初始进度，任务未开始");
+        }
+        try {
+            worker_ = std::jthread([this](std::stop_token stop) {
+                using Clock = std::chrono::steady_clock;
+                auto nextTick = Clock::now() + std::chrono::seconds(1);
+                auto nextWrite = Clock::now() + std::chrono::seconds(30);
+                std::unique_lock<std::mutex> lock(mutex_);
+                while (true) {
+                    wake_.wait_until(lock, stop, std::min(nextTick, nextWrite),
+                        [this]() { return !pending_.empty(); });
+                    if (stop.stop_requested() && pending_.empty()) break;
+                    const auto now = Clock::now();
+                    const bool event = !pending_.empty();
+                    const bool tick = !stop.stop_requested() && now >= nextTick;
+                    const bool due = !stop.stop_requested() && now >= nextWrite;
+                    auto row = event ? std::move(pending_.front()) : snapshot();
+                    if (event) pending_.pop_front();
+                    if (tick) nextTick = now + std::chrono::seconds(1);
+                    if (due && !event) nextWrite = now + std::chrono::seconds(30);
+                    lock.unlock();
+                    if (event || tick) print(row, "running");
+                    if (event || due) write(row);
+                    lock.lock();
+                }
+            });
+        } catch (...) {
+            finish("failed", "无法启动进度线程");
+            throw;
+        }
+    }
+
+    ~OsgbProgressReporter() {
+        if (!finished_) finish("failed", "任务异常退出");
+    }
+
+    const std::string& taskId() const {
+        return taskId_;
+    }
+
+    void beginChunk(const std::string& name) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        chunkName_ = name;
+        // 首个分块只补充名称，复用任务开始时已写入的 0.00% 扫描记录。
+        if (completed_ == 0 && basePct_ == 0.0 && spanPct_ == 0.0 && !chunkDoneStage_) return;
+        stageTitle_ = "正在扫描 OSGB 文件";
+        basePct_ = spanPct_ = 0.0;
+        total_ = 0;
+        chunkDoneStage_ = false;
+        done_.store(0, std::memory_order_relaxed);
+        pending_.push_back(snapshot());
+        wake_.notify_one();
+    }
+
+    void setStage(const std::string& title, double basePct, double spanPct, size_t total) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stageTitle_ = title;
+            basePct_ = basePct;
+            spanPct_ = spanPct;
+            total_ = total;
+            chunkDoneStage_ = false;
+            done_.store(0, std::memory_order_relaxed);
+            pending_.push_back(snapshot());
+        }
+        wake_.notify_one();
+    }
+
+    void completeChunk() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++completed_;
+            stageTitle_ = "分块处理完成";
+            basePct_ = spanPct_ = 0.0;
+            total_ = 0;
+            chunkDoneStage_ = true;
+            done_.store(0, std::memory_order_relaxed);
+            pending_.push_back(snapshot());
+        }
+        wake_.notify_one();
+    }
+
+    void advance(size_t count = 1) {
+        done_.fetch_add(count, std::memory_order_relaxed);
+    }
+
+    // 坐标转换同步使用该计数器；切换阶段前必须等待当前阶段所有工作线程结束。
+    std::atomic<size_t>* doneCounter() {
+        return &done_;
+    }
+
+    bool finish(const std::string& status, const std::string& message) {
+        if (finished_) return finalOk_;
+        worker_.request_stop();
+        if (worker_.joinable()) worker_.join();
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto row = snapshot();
+        if (status == "success") {
+            row.percent = 100.0;
+            row.message = message;
+        } else {
+            row.message += "；" + message;
+        }
+        print(row, status);
+        finalOk_ = write(row, status);
+        finished_ = true;
+        return finalOk_;
+    }
+
+private:
+    // 构造时线程尚未启动；其余调用均持有 mutex_，保证阶段信息与计数一致。
+    Snapshot snapshot() const {
+        const size_t done = done_.load(std::memory_order_relaxed);
+        std::string message = stageTitle_;
+        if (total_ > 0) {
+            message += "，已处理 " + std::to_string(done) + "/" + std::to_string(total_);
+        }
+        const size_t index = chunkDoneStage_ ? completed_ : std::min(completed_ + 1, totalChunks_);
+        message += "，分块 " + std::to_string(index) + "/" + std::to_string(totalChunks_);
+        if (!chunkName_.empty()) message += "（" + chunkName_ + "）";
+        const double ratio = total_ == 0 ? 0.0 : std::min(1.0, static_cast<double>(done) / static_cast<double>(total_));
+        const double chunkPct = basePct_ + spanPct_ * ratio;
+        const double percent = totalChunks_ == 0 ? 0.0 : (100.0 * completed_ + chunkPct) / static_cast<double>(totalChunks_);
+        return {completed_, std::min(percent, 99.99), std::move(message)};
+    }
+
+    void print(const Snapshot& row, const std::string& status) const {
+        std::osyncstream(std::cout) << "[OSGB进度] task_id=" << taskId_ << " | " << osgbPercentText(row.percent)
+            << " | " << status << " | " << row.message << " | Time: " << osgbBeijingTime() << std::endl;
+    }
+
+    bool write(const Snapshot& row, const std::string& status = "running") {
+        const auto text = osgbPercentText(row.percent);
+        if (status == "running" && text == lastSaved_) return true;
+        try {
+            db_->execSqlSync(
+                "INSERT INTO public.update_progress "
+                "(task_id, grid_level, status, progress_content, completed_chunks, total_chunks, create_time, message) "
+                "VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai', $7)",
+                taskId_, level_, status, text, static_cast<int64_t>(row.completedChunks),
+                static_cast<int64_t>(totalChunks_), row.message);
+            if (status == "running") lastSaved_ = text;
+            return true;
+        } catch (const std::exception& e) {
+            LOG_ERROR << "OSGB 进度写入失败，task_id=" << taskId_ << ": " << e.what();
+            return false;
+        }
+    }
+
+    drogon::orm::DbClientPtr db_;
+    std::string taskId_, stageTitle_ = "正在扫描 OSGB 文件", chunkName_, lastSaved_;
+    int level_;
+    size_t totalChunks_, completed_ = 0, total_ = 0;
+    double basePct_ = 0.0, spanPct_ = 0.0;
+    bool chunkDoneStage_ = false, finished_ = false, finalOk_ = false;
+    std::atomic<size_t> done_{0};
+    std::mutex mutex_;
+    std::condition_variable_any wake_;
+    // 保存每次切换时的快照，短阶段连续切换和退出收尾时也不会丢失记录。
+    std::deque<Snapshot> pending_;
+    std::jthread worker_;
+};
+
+} // namespace
+
+/*----继续
+struct MemoryCheck{
+    bool allow=false;
+    uint64_t availableBytes = 0;
+    uint64_t requiredBytes = 0;
+    std::string message;
+};
+std::optional<uint64_t>getAvailableMemoryBytes()
+{
+    MemoryCheck m;
+    std::ifstream file("/proc/meminfo");
+    if(!file.is_open()){
+        m.message="无法获取Linux剩余可用内存";
+        return std::nullopt;
+    }
+    std::string line;
+    while (std::getline(file, line)){
+        std::istringstream stream(line);
+
+        std::string key;
+        stream >> key;
+
+        if (key == "MemAvailable:") {
+            uint64_t value = 0;
+            std::string unit;
+
+            if (!(stream >> value >> unit) || unit != "kB" ||
+                value > std::numeric_limits<uint64_t>::max() / 1024) {
+                return std::nullopt;
+                }
+
+            return value * 1024; // kB 转换为字节
+        }
+    }
+
+    return std::nullopt; // 没找到 MemAvailable
+
+    
+}
+/*
 /**
  * @brief 插入更新日志到数据库
  *
@@ -130,6 +397,7 @@ bool insertUpdateLog(const std::shared_ptr<drogon::orm::DbClient>& dbClient,
  */
 void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void (const HttpResponsePtr &)> &&callback) const
 {
+    std::shared_ptr<OsgbProgressReporter> progress;
     try {
         // ==================== 参数验证阶段 ====================
         auto body = req->getJsonObject();
@@ -230,7 +498,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         try {
             std::string createTableSql = "CREATE TABLE IF NOT EXISTS " + tableName + " ("
                      "code NUMERIC(40,0) PRIMARY KEY, "           // 网格编码
-                     "center GEOMETRY(POINTZ, 4326), "             // 中心点3D坐标
+                     "center GEOMETRY(POINTZ, 4490), "             // 中心点3D坐标
                      "maxlon DOUBLE PRECISION, "
                      "minlon DOUBLE PRECISION, "
                      "maxlat DOUBLE PRECISION, "
@@ -246,7 +514,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             LOG_INFO << "成功创建或确认表存在: " << tableName;
         } catch (const drogon::orm::DrogonDbException &e) {
             LOG_ERROR << "创建数据库表失败: " << e.base().what();
-            // 继续执行
+            throw;
         }
 
         // ==================== 分块策略准备 ====================
@@ -281,6 +549,16 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         LOG_INFO << "检测到 " << chunks.size() << " 个分块数据待处理";
         cout << "检测到 " << chunks.size() << " 个分块数据待处理" << endl;
 
+        progress = std::make_shared<OsgbProgressReporter>(dbClient, level, chunks.size());
+        const std::string taskId = progress->taskId();
+
+        std::thread([folder, level, tableName, chunks = std::move(chunks), progress]() {
+            auto dbClient = drogon::app().getDbClient("default");
+            try {
+                if (!dbClient) {
+                    throw std::runtime_error("无法连接到数据库");
+                }
+
         // ==================== 全局统计变量 ====================
         std::atomic<uint64_t> totalTrianglesProcessed{0};
         std::atomic<uint64_t> totalGridCount{0};
@@ -304,6 +582,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
         // ==================== 顺序处理每个分块 ====================
         // 为了防止内存溢出，现在顺序处理每个分块，确保一个分块完全处理完后再处理下一个
         for (const auto& chunkFolder : chunks) {
+            progress->beginChunk(std::filesystem::path(chunkFolder).filename().string());
             LOG_INFO << "正在顺序处理分块: " << chunkFolder;
 
             // 记录分块处理开始日志
@@ -368,23 +647,19 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                 for (const auto& files : selectedFiles) {
                     totalFiles += files.size();
                 }
-                std::atomic<size_t> completedFiles{0};
+                progress->setStage("正在提取 OSGB 文件", 0.0, 30.0, totalFiles);
                 LOG_INFO << "开始提取 OSGB 文件，总数: " << totalFiles;
 
                 std::vector<std::future<std::vector<Triangle>>> futures;
                 for (const auto& files : selectedFiles) {
-                    futures.push_back(std::async(std::launch::async, [files, &completedFiles, totalFiles]() {
+                    futures.push_back(std::async(std::launch::async, [files, reporter = progress.get()]() {
                         std::vector<Triangle> result;
                         for (const auto& file : files) {
                             osg::ref_ptr<osg::Node> node = osgDB::readNodeFile(file.string());
                             if (node) extractTriangles(node.get(), result);
                             else LOG_WARN << "加载 OSGB 文件失败: " << file.string();
 
-                            const size_t done = completedFiles.fetch_add(1, std::memory_order_relaxed) + 1;
-                            if (done == 1 || done % 800 == 0 || done == totalFiles) {
-                                LOG_INFO << "OSGB 文件处理进度: " << done << "/" << totalFiles
-                                         << " (" << static_cast<int>(100.0 * done / totalFiles) << "%)";
-                            }
+                            reporter->advance();
                         }
                         return result;
                     }));
@@ -403,18 +678,23 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                 // 记录分块处理完成日志（跳过的情况）
                 std::string chunkEndContent = "分块处理完成（跳过，无数据）: " + chunkFolder;
                 insertUpdateLog(dbClient, "6", "实景三维数据网格化", chunkEndContent);
+                progress->completeChunk();
                 continue;
             }
 
             totalTrianglesProcessed.fetch_add(static_cast<uint64_t>(triangles.size()));
 
+            progress->setStage("正在转换坐标至 EPSG:4490", 30.0, 10.0, triangles.size());
             try {
                 const std::filesystem::path metadataDir = findMetadataDir(chunkFolder);
-                if (!metadataDir.empty()) {
-                    convertCoordinatesFromXML(triangles, metadataDir.string(), "EPSG:4326");
+                if (metadataDir.empty()) {
+                    throw std::runtime_error("未找到 metadata.xml");
                 }
+                convertCoordinatesFromXML(triangles, metadataDir.string(), "EPSG:4490", progress->doneCounter());
             } catch (const std::exception& e) {
-                LOG_WARN << "坐标转换失败: " << e.what();
+                // 由外层返回错误响应，失败分块不再进入网格化。
+                throw std::runtime_error("OSGB 分块坐标转换失败，分块: " + chunkFolder +
+                    "，原因: " + e.what());
             }
         // 处理三角形到网格的转换
             std::unordered_set<std::string> chunkCodes;
@@ -422,6 +702,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             const unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency() / 2); // 限制线程数以控制内存使用
             const size_t trianglesPerThread = (triangles.size() + numThreads - 1) / numThreads;
 
+            progress->setStage("正在计算三角形网格及合并结果", 40.0, 40.0, triangles.size());
             // 并行处理三角形到网格的转换
             std::vector<std::future<std::pair<std::unordered_set<std::string>, uint64_t>>> futures;
             for (unsigned int i = 0; i < numThreads; ++i) {
@@ -432,7 +713,8 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                 futures.push_back(std::async(std::launch::async, [&, startIdx, endIdx]() {
                     std::unordered_set<std::string> localCodes;
                     uint64_t localDiscarded = 0;
-                    for (size_t idx = startIdx; idx < endIdx; ++idx) {
+                    // 增量表达式在 continue 后也执行，过滤掉的面片同样计为已处理。
+                    for (size_t idx = startIdx; idx < endIdx; ++idx, progress->advance()) {
                         const auto &t = triangles[idx];
                         if (std::isnan(t.vertex1.Lng) || std::isnan(t.vertex1.Lat) || std::isnan(t.vertex1.Hgt) ||
                             std::isnan(t.vertex2.Lng) || std::isnan(t.vertex2.Lat) || std::isnan(t.vertex2.Hgt) ||
@@ -477,10 +759,12 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             // 清理三角形数据以释放内存
             std::vector<Triangle>().swap(triangles);
 
+            progress->setStage("正在整理网格入库记录", 80.0, 10.0, chunkCodes.size());
             // 将网格代码转换为数据库记录
             std::vector<models::GridData> gridDataList;
             gridDataList.reserve(chunkCodes.size());
-            for (const auto &code : chunkCodes) {
+            for (auto codeIt = chunkCodes.begin(); codeIt != chunkCodes.end(); ++codeIt, progress->advance()) {
+                const auto &code = *codeIt;
                 try {
                     LatLonHei gridInfo = getLocalTileLatLon(code, baseTile);
                     IJH localRCH = getLocalTileRHC(code);
@@ -491,7 +775,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                     } else {
                         gridData.code = std::stoll(code);
                     }
-                    gridData.centerGeometry = "SRID=4326;POINT(" +
+                    gridData.centerGeometry = "SRID=4490;POINT(" +
                         std::to_string(gridInfo.longitude) + " " +
                         std::to_string(gridInfo.latitude) + " " +
                         std::to_string(gridInfo.height) + ")";
@@ -511,11 +795,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
 
             totalGridCount.fetch_add(static_cast<uint64_t>(chunkCodes.size()));
 
-            // 记录分块处理完成日志（使用gridDataList.size()而不是triangles.size()，因为triangles已被清理）
-            std::string chunkEndContent = "分块处理完成: " + chunkFolder +
-                                         ", 网格数量: " + std::to_string(chunkCodes.size());
-            insertUpdateLog(dbClient, "6", "实景三维数据网格化", chunkEndContent);
-
+            progress->setStage("正在写入 PostgreSQL", 90.0, 10.0, gridDataList.size());
             // 分批入库，避免单次处理过多数据
             int batchSize = 1000;
             for (size_t i = 0; i < gridDataList.size(); i += batchSize) {
@@ -536,10 +816,18 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                 sql += " ON CONFLICT (code) DO NOTHING";
                 try {
                     dbClient->execSqlSync(sql);
+                    progress->advance(end - i);
                 } catch (const std::exception &e) {
                     LOG_ERROR << "入库失败: " << e.what();
+                    throw std::runtime_error("OSGB 分块入库失败: " + chunkFolder + "，原因: " + e.what());
                 }
             }
+
+            // 全部分批 SQL 成功后，才更新完成数和分块完成日志。
+            progress->completeChunk();
+            std::string chunkEndContent = "分块处理完成: " + chunkFolder +
+                                         ", 网格数量: " + std::to_string(chunkCodes.size());
+            insertUpdateLog(dbClient, "6", "实景三维数据网格化", chunkEndContent);
 
             // 清理当前分块的内存
             std::vector<models::GridData>().swap(gridDataList);
@@ -548,9 +836,18 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
             LOG_INFO << "分块 " << chunkFolder << " 处理完成并已清理内存";
         }
 
-        // ==================== 响应构建 ====================
+        // ==================== 后台任务收尾 ====================
         LOG_INFO << "所有分块处理完成，共处理三角形: " << totalTrianglesProcessed
                  << "，处理网格总数: " << totalGridCount;
+
+        if (totalTrianglesProcessed.load() == 0)
+        {
+            const std::string errMsg = "未识别到有效的 OSGB 模型文件或未提取到三角形面片数据，请检查目录与数据";
+            progress->finish("failed", errMsg);
+            insertUpdateLog(dbClient, "6", "实景三维数据网格化",
+                            "OSGB网格化处理失败 - 目录: " + folder + ", 原因: " + errMsg);
+            return;
+        }
 
         // 记录处理完成日志
         std::string completeContent = "OSGB网格化处理完成 - 目录: " + folder +
@@ -560,24 +857,26 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
                                     ", 目标表: " + tableName;
         insertUpdateLog(dbClient, "6", "实景三维数据网格化", completeContent);
 
-        if (totalTrianglesProcessed.load() == 0)
-        {
-            Json::Value err;
-            err["status"] = "error";
-            err["message"] = "未识别到有效的 OSGB 模型文件或未提取到三角形面片数据，请检查目录与数据";
-            auto resp = HttpResponse::newHttpJsonResponse(err);
-            resp->setStatusCode(k400BadRequest);
-            callback(resp);
-            return;
+        if (!progress->finish("success", "处理完成，数据已存入数据库")) {
+            throw std::runtime_error("OSGB 数据已入库，但最终进度写入失败，请检查运行日志");
         }
+            } catch (const std::exception &e) {
+                LOG_ERROR << "OSGB 后台任务异常，task_id=" << progress->taskId() << ": " << e.what();
+                progress->finish("failed", e.what());
+                try {
+                    if (dbClient) {
+                        std::string errorContent = "OSGB网格化处理异常 - 错误信息: " + std::string(e.what());
+                        insertUpdateLog(dbClient, "6", "实景三维数据网格化", errorContent);
+                    }
+                } catch (...) {
+                    LOG_ERROR << "记录错误日志失败";
+                }
+            }
+        }).detach();
 
         Json::Value res;
-        res["status"] = "success";
-        res["data"]["total_triangles_processed"] = static_cast<Json::UInt64>(totalTrianglesProcessed.load());
-        res["data"]["total_grid_count"] = static_cast<Json::UInt64>(totalGridCount.load());
-        res["data"]["total_discarded_triangles"] = static_cast<Json::UInt64>(totalDiscardedTriangles.load());
-        res["data"]["message"] = "处理完成，数据已存入数据库";
-        // 移除 cells 字段，避免内存溢出
+        res["task_id"] = taskId;
+        res["message"] = "OSGB 网格化任务已启动，正在后台计算";
 
         auto resp = HttpResponse::newHttpJsonResponse(res);
         resp->setStatusCode(k200OK);
@@ -586,6 +885,7 @@ void triangleGrid::osgbToGridJson(const HttpRequestPtr& req, std::function<void 
     } catch (const std::exception &e) {
         // ==================== 异常处理阶段 ====================
         // 统一的异常处理，确保API返回标准化的错误响应
+        if (progress) progress->finish("failed", e.what());
 
         // 尝试记录错误日志
         try {

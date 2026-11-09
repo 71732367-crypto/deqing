@@ -111,6 +111,7 @@ Validation order:
 
 ## 9. Git and Work Scope
 
+- **Strictly read-only by default**: Never modify, create, or edit any code or configuration files unless the user explicitly requests code modifications in their prompt (只有用户主动明确要求修改项目代码才能进行修改，绝不能自主修改代码). Default to read-only analysis, explanation, and recommendation mode.
 - Run `git status --short` before editing and preserve existing user changes.
 - Modify only files required by the request; do not format or refactor unrelated modules.
 - Do not use `git reset --hard`, `git checkout --`, or `git clean`, and do not delete build directories to work around failures.

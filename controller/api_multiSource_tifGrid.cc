@@ -36,7 +36,7 @@ std::string pgNumber(double value) {
 /// 沿用 OSGB 的网格字段，DEM 单独按层级存储，避免混淆数据来源。
 void ensureDemGridTable(const drogon::orm::DbClientPtr& dbClient, const std::string& tableName) {
     dbClient->execSqlSync("CREATE TABLE IF NOT EXISTS public." + tableName + " ("
-        "code NUMERIC(40,0) PRIMARY KEY, center GEOMETRY(POINTZ, 4326), "
+        "code NUMERIC(40,0) PRIMARY KEY, center GEOMETRY(POINTZ, 4490), "
         "maxlon DOUBLE PRECISION, minlon DOUBLE PRECISION, "
         "maxlat DOUBLE PRECISION, minlat DOUBLE PRECISION, "
         "top DOUBLE PRECISION, bottom DOUBLE PRECISION, "
@@ -87,7 +87,7 @@ size_t saveDemGridBatch(const drogon::orm::DbClientPtr& dbClient, const std::str
         ", 累计处理网格: " + std::to_string(processedCount + batch.size());
     const std::string sql = "WITH inserted AS (INSERT INTO public." + tableName +
         " (code, center, maxlon, minlon, maxlat, minlat, top, bottom, x, y, z, type) "
-        "SELECT code, ST_SetSRID(ST_MakePoint(longitude, latitude, height), 4326), "
+        "SELECT code, ST_SetSRID(ST_MakePoint(longitude, latitude, height), 4490), "
         "maxlon, minlon, maxlat, minlat, top, bottom, x, y, z, 'dem' "
         "FROM UNNEST($1::numeric[], $2::double precision[], $3::double precision[], "
         "$4::double precision[], $5::double precision[], $6::double precision[], "

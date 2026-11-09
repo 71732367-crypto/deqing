@@ -17,6 +17,7 @@ No part of this code may be copied or distributed in any form without permission
 #include <algorithm>
 #include <limits>
 #include <iomanip>
+#include <stdexcept>
 
 #include <osg/Node>
 #include <osg/Geode>
@@ -344,12 +345,13 @@ CoordinateOffset readCoordinateOffsetFromXML(const std::string& dataDir) {
 // 输入参数：
 // triangles：要转换的三角形数组引用
 // sourceCRS：源坐标系字符串（为空时尝试从XML读取）
-// targetCRS：目标坐标系字符串（默认WGS84）
+// targetCRS：目标坐标系字符串（默认CGCS2000）
 // offsetX, offsetY, offsetZ：坐标偏移量（默认0,0,0）
 void convertCoordinates(vector<Triangle>& triangles,
     const string& sourceCRS,
     const string& targetCRS,
-    double offsetX , double offsetY,double offsetZ)
+    double offsetX , double offsetY,double offsetZ,
+    std::atomic<size_t>* doneCount)
 {
     // 如果未提供源坐标系，尝试从XML读取
     string actualSourceCRS = sourceCRS;
@@ -360,12 +362,8 @@ void convertCoordinates(vector<Triangle>& triangles,
         std::cout << "[信息] 使用默认源坐标系: " << actualSourceCRS << std::endl;
     }
 
-    // 确保目标坐标系为WGS84
-    string actualTargetCRS = targetCRS;
-    if (actualTargetCRS != "EPSG:4326") {
-        std::cout << "[信息] 目标坐标系已设置为WGS84 (EPSG:4326)" << std::endl;
-        actualTargetCRS = "EPSG:4326";
-    }
+    // 默认 CGCS2000，保留调用者显式指定的目标坐标系。
+    string actualTargetCRS = targetCRS.empty() ? "EPSG:4490" : targetCRS;
 
     // 检查是否使用了默认偏移量(0,0,0)，如果是，提示可能需要从XML读取
     if (offsetX == 0.0 && offsetY == 0.0 && offsetZ == 0.0) {
@@ -392,8 +390,7 @@ void convertCoordinates(vector<Triangle>& triangles,
 
     PJ_CONTEXT* context = proj_context_create();
     if (!context) {
-        cerr << "创建PROJ上下文失败" << endl;
-        return;
+        throw std::runtime_error("创建 PROJ 上下文失败");
     }
 
     // 创建坐标转换
@@ -402,19 +399,16 @@ void convertCoordinates(vector<Triangle>& triangles,
         actualTargetCRS.c_str(),
         nullptr);
     if (!proj) {
-        cerr << "未能成功坐标转换: "
-            << actualSourceCRS << " to " << actualTargetCRS << endl;
         proj_context_destroy(context);
-        return;
+        throw std::runtime_error("无法创建坐标转换: " + actualSourceCRS + " -> " + actualTargetCRS);
     }
 
     // 创建可视化转换（自动处理轴顺序）
     PJ* transform = proj_normalize_for_visualization(context, proj);
     proj_destroy(proj);
     if (!transform) {
-        cerr << "创建可视化转换失败" << endl;
         proj_context_destroy(context);
-        return;
+        throw std::runtime_error("创建坐标轴归一化转换失败");
     }
 
     // 执行坐标转换
@@ -428,8 +422,16 @@ void convertCoordinates(vector<Triangle>& triangles,
             // 创建包含三维坐标的输入
             PJ_COORD src = proj_coord(adjustedLng, adjustedLat, adjustedHgt, 0);
 
-            // 执行坐标转换
+            // 转换失败时终止整个分块，禁止无效坐标继续参与网格化。
+            proj_errno_reset(transform);
             PJ_COORD dst = proj_trans(transform, PJ_FWD, src);
+            if (proj_errno(transform) != 0 ||
+                !std::isfinite(dst.xyz.x) || !std::isfinite(dst.xyz.y) ||
+                !std::isfinite(dst.xyz.z)) {
+                proj_destroy(transform);
+                proj_context_destroy(context);
+                throw std::runtime_error("OSGB 顶点坐标转换失败或返回非有限值");
+            }
 
             // 处理输出坐标
             if (proj_degree_input(transform, PJ_FWD)) {
@@ -447,6 +449,7 @@ void convertCoordinates(vector<Triangle>& triangles,
         transformVertex(triangle.vertex1);
         transformVertex(triangle.vertex2);
         transformVertex(triangle.vertex3);
+        if (doneCount) doneCount->fetch_add(1, std::memory_order_relaxed);
     }
 
     // 清理资源
@@ -460,10 +463,11 @@ void convertCoordinates(vector<Triangle>& triangles,
 // 输入参数：
 // triangles：要转换的三角形数组引用
 // dataDir：包含 metadata.xml 的数据目录路径
-// targetCRS：目标坐标系，默认WGS84 (EPSG:4326)
+// targetCRS：目标坐标系，默认CGCS2000 (EPSG:4490)
 void convertCoordinatesFromXML(vector<Triangle>& triangles,
     const std::string& dataDir,
-    const string& targetCRS)
+    const string& targetCRS,
+    std::atomic<size_t>* doneCount)
 {
     // 从XML读取源坐标系
     std::string sourceCRS = readSourceCRSFromXML(dataDir);
@@ -471,18 +475,14 @@ void convertCoordinatesFromXML(vector<Triangle>& triangles,
     // 从XML读取坐标偏移量
     CoordinateOffset offset = readCoordinateOffsetFromXML(dataDir);
 
-    // 确保目标坐标系为WGS84
-    string actualTargetCRS = targetCRS;
-    if (actualTargetCRS != "EPSG:4326") {
-        std::cout << "[信息] 目标坐标系已设置为WGS84 (EPSG:4326)" << std::endl;
-        actualTargetCRS = "EPSG:4326";
-    }
+    // 默认 CGCS2000，保留调用者显式指定的目标坐标系。
+    string actualTargetCRS = targetCRS.empty() ? "EPSG:4490" : targetCRS;
 
     std::cout << "[信息] 开始坐标转换: " << sourceCRS << " -> " << actualTargetCRS
               << "，偏移量: (" << offset.offsetX << ", " << offset.offsetY << ", " << offset.offsetZ << ")" << std::endl;
 
     // 调用原版本的转换函数
-    convertCoordinates(triangles, sourceCRS, actualTargetCRS, offset.offsetX, offset.offsetY, offset.offsetZ);
+    convertCoordinates(triangles, sourceCRS, actualTargetCRS, offset.offsetX, offset.offsetY, offset.offsetZ, doneCount);
 }
 
 // OSG坐标转换函数：将XML中的顶点坐标转换为OSG使用的本地坐标系统
@@ -494,7 +494,7 @@ std::vector<osg::Vec3d> convertOSG_Coordinates(const std::vector<Vertex>& vertic
     double offsetX, double offsetY, double offsetZ)
 {
     PJ_CONTEXT* C = proj_context_create();
-    PJ* P = proj_create_crs_to_crs(C, "EPSG:4326", "EPSG:2326", nullptr);
+    PJ* P = proj_create_crs_to_crs(C, "EPSG:4490", "EPSG:2326", nullptr);
     PJ* P_for_GIS = proj_normalize_for_visualization(C, P);
     std::vector<osg::Vec3d> projectedVertices;
 

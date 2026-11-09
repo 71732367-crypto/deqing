@@ -78,10 +78,10 @@ void basicGrid::getGridByPoint(const HttpRequestPtr& req, std::function<void (co
             return;
         }
 
-        if (level < 1 || level > 15) {
+        if (level < 1 || level > 21) {
             Json::Value response;
             response["status"] = "error";
-            response["message"] = "层级必须在1到15之间";
+            response["message"] = "层级必须在1到21之间";
             auto resp = HttpResponse::newHttpJsonResponse(response);
             resp->setStatusCode(k400BadRequest);
             callback(resp);
@@ -208,10 +208,10 @@ void basicGrid::getCodeByLB(const HttpRequestPtr& req, std::function<void (const
             return;
         }
 
-        if (level < 1 || level > 15) {
+        if (level < 1 || level > 21) {
             Json::Value response;
             response["status"] = "error";
-            response["message"] = "层级必须在1到15之间";
+            response["message"] = "层级必须在1到21之间";
             auto resp = HttpResponse::newHttpJsonResponse(response);
             resp->setStatusCode(k400BadRequest);
             callback(resp);

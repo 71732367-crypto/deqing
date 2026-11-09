@@ -515,8 +515,8 @@ std::vector<std::string> lineToLocalCode(const std::vector<PointLBHd>& lineReq, 
  * @return 返回目标点的经纬度
  */
 PointLBd getLngLat(double lng, double lat, double brng, double dist) {
-	const double a = WGS84a;       // ���뾶
-	const double f = WGS84f;       // ����
+	const double a = CGCS2000a;       // ���뾶
+	const double f = CGCS2000f;       // ����
 	const double radBrng = brng * RegToRad; // ��λ��ת��Ϊ����
 	const double sinAlpha1 = std::sin(radBrng);
 	const double cosAlpha1 = std::cos(radBrng);
@@ -527,11 +527,11 @@ PointLBd getLngLat(double lng, double lat, double brng, double dist) {
 	double sigma1 = std::atan2(tanU1, cosAlpha1);
 	double sinAlpha = cosU1 * sinAlpha1;
 	double cosSqAlpha = 1 - sinAlpha * sinAlpha;
-	double uSq = cosSqAlpha * (a * a - WGS84b * WGS84b) / (WGS84b * WGS84b);
+	double uSq = cosSqAlpha * (a * a - CGCS2000b * CGCS2000b) / (CGCS2000b * CGCS2000b);
 	double A = 1 + uSq / 16384.0 * (4096.0 + uSq * (-768.0 + uSq * (320.0 - 175.0 * uSq)));
 	double B = uSq / 1024.0 * (256.0 + uSq * (-128.0 + uSq * (74.0 - 47.0 * uSq)));
 
-	double sigma = dist / (WGS84b * A);
+	double sigma = dist / (CGCS2000b * A);
 	double sigmaP;
 	double sinSigma, cosSigma, cos2SigmaM, deltaSigma;
 
@@ -544,7 +544,7 @@ PointLBd getLngLat(double lng, double lat, double brng, double dist) {
 				B / 6.0 * cos2SigmaM * (-3.0 + 4.0 * sinSigma * sinSigma) *
 				(-3.0 + 4.0 * cos2SigmaM * cos2SigmaM)));
 		sigmaP = sigma;
-		sigma = dist / (WGS84b * A) + deltaSigma;
+		sigma = dist / (CGCS2000b * A) + deltaSigma;
 	} while (std::fabs(sigma - sigmaP) > 1e-12);
 
 	double tmp = sinU1 * sinSigma - cosU1 * cosSigma * cosAlpha1;

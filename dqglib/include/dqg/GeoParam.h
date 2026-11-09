@@ -5,6 +5,17 @@
 
 // 常数定义
 constexpr double PI = 3.14159265358979323846;
+// 内部水平坐标使用 CGCS2000 经纬度，经度在前；高度沿用数据源约定。
+inline constexpr const char* cgcs2000Crs = "EPSG:4490";
+inline constexpr int cgcs2000Srid = 4490;
+constexpr double CGCS2000a = 6378137.0; // 长半轴（米）
+constexpr double CGCS2000InverseF = 298.257222101;
+constexpr double CGCS2000f = 1.0 / CGCS2000InverseF;
+constexpr double CGCS2000b = CGCS2000a * (1.0 - CGCS2000f);
+constexpr double CGCS2000e2 = CGCS2000f * (2.0 - CGCS2000f);
+
+// 保留真实 WGS84 参数供旧调用者显式使用；内部默认计算不再引用它们。
+
 
 // WGS84参数
 constexpr double WGS84a = 6378137.0; // 长半径
